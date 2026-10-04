@@ -1,0 +1,163 @@
+/* Overrides for react-phone-input-2 so it matches the flat Input.tsx look.
+   Everything is scoped to .phone-field (the containerClass) and outranks
+   the library's `.react-tel-input .x` selectors. */
+
+.react-tel-input.phone-field {
+    font-family: inherit;
+    font-size: 0.875rem;
+    width: 100%;
+}
+
+/* Number input: transparent, borderless, sits inside the gray box */
+.react-tel-input.phone-field .phone-field__input {
+    width: 100%;
+    height: 1.25rem;
+    padding: 0 0 0 2.25rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    outline: none;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    letter-spacing: normal;
+    color: var(--color-gray-900);
+}
+
+.react-tel-input.phone-field .phone-field__input:focus,
+.react-tel-input.phone-field .phone-field__input.invalid-number,
+.react-tel-input.phone-field .phone-field__input.invalid-number:focus {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    outline: none;
+}
+
+.react-tel-input.phone-field .phone-field__input::placeholder {
+    color: var(--color-gray-400);
+}
+
+[data-invalid="true"] .react-tel-input.phone-field .phone-field__input::placeholder {
+    color: var(--color-red-400);
+}
+
+.react-tel-input.phone-field .phone-field__input:disabled {
+    cursor: not-allowed;
+}
+
+/* Flag + arrow button */
+.react-tel-input.phone-field .phone-field__button,
+.react-tel-input.phone-field .phone-field__button.open,
+.react-tel-input.phone-field .phone-field__button.invalid-number {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
+.react-tel-input.phone-field .phone-field__button .selected-flag,
+.react-tel-input.phone-field .phone-field__button .selected-flag:hover,
+.react-tel-input.phone-field .phone-field__button .selected-flag:focus,
+.react-tel-input.phone-field .phone-field__button.open .selected-flag {
+    width: 2rem;
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+    outline: none;
+}
+
+.react-tel-input.phone-field .phone-field__button .selected-flag .arrow {
+    left: 1.25rem;
+    border-top-color: var(--color-gray-500);
+}
+
+.react-tel-input.phone-field .phone-field__button .selected-flag .arrow.up {
+    border-bottom-color: var(--color-gray-500);
+}
+
+.react-tel-input.phone-field input:disabled + .phone-field__button,
+.react-tel-input.phone-field input:disabled + .phone-field__button .selected-flag {
+    cursor: not-allowed;
+}
+
+/* Country dropdown */
+.react-tel-input.phone-field .phone-field__dropdown {
+    z-index: 20;
+    width: 18rem;
+    max-height: 16rem;
+    margin: 1.125rem 0 0 -0.75rem;
+    padding: 0.25rem;
+    overflow-y: auto;
+    border: 0;
+    border-radius: 0.75rem;
+    background: #fff;
+    box-shadow: 0 10px 30px -8px rgb(0 0 0 / 0.18), 0 0 0 1px rgb(0 0 0 / 0.04);
+    font-size: 0.875rem;
+    color: var(--color-gray-900);
+    cursor: default;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .country {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .country .flag {
+    flex-shrink: 0;
+    margin-top: 0;
+    margin-right: 0.5rem;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .country:hover,
+.react-tel-input.phone-field .phone-field__dropdown .country.highlight {
+    background-color: var(--color-gray-100);
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .country .dial-code {
+    color: var(--color-gray-500);
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .divider {
+    margin: 0.25rem 0;
+    padding: 0;
+    border-bottom: 1px solid var(--color-gray-100);
+}
+
+/* searchClass lands on the sticky <li> and on the <input> (as `${searchClass}-box`) */
+.react-tel-input.phone-field .phone-field__dropdown li.search {
+    top: -0.25rem;
+    margin: -0.25rem -0.25rem 0;
+    padding: 0.25rem 0.25rem 0.25rem;
+    border-radius: 0;
+    background: #fff;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .phone-field__search-box {
+    width: 100%;
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: var(--color-gray-100);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: var(--color-gray-900);
+    outline: none;
+    box-shadow: none;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .phone-field__search-box::placeholder {
+    color: var(--color-gray-400);
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .phone-field__search-box::-webkit-search-cancel-button {
+    appearance: none;
+}
+
+.react-tel-input.phone-field .phone-field__dropdown .no-entries-message {
+    padding: 0.5rem;
+    color: var(--color-gray-500);
+    opacity: 1;
+}
