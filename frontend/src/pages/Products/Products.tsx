@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
 import { useQuery } from "@tanstack/react-query";
 import { CircleAlert, Plus, RotateCcw } from "lucide-react";
-import { format, parse } from "date-fns";
+import { parse } from "date-fns";
 import type { AxiosResponse } from "axios";
 import type { IProductBranchScopeModel, IProductModel, IProductRequestModel, IProductResponseModel } from "@/models/Product";
 import type { ApiResponseModel } from "@/services/api";
@@ -15,6 +15,7 @@ import productService from "@/services/product-service";
 import { useDebounce } from "@/hook/useDebounce";
 import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
+import { DateToDateStringWithMonth } from "@/util/DateFormate";
 import AddProductForm from "./AddProductForm";
 import DeleteProductDialog from "./DeleteProductDialog";
 
@@ -101,10 +102,7 @@ const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilter
     );
 };
 
-const formatDate = (value: string | null | undefined) => {
-    const date = value ? new Date(value) : null;
-    return date && !Number.isNaN(date.getTime()) ? format(date, "dd MMM yyyy, hh:mm a") : "-";
-};
+const formatDate = (value: string | null | undefined) => DateToDateStringWithMonth(value);
 
 // One quantity column per visible branch: every branch for admins, only their own for members
 const buildColumns = (scope: IProductBranchScopeModel): TableColumn<IProductModel>[] => [

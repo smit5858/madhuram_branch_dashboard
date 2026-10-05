@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { CircleAlert, Plus, RotateCcw } from "lucide-react";
-import { format, parse } from "date-fns";
+import { parse } from "date-fns";
 import toast from "react-hot-toast";
 import type { AxiosResponse } from "axios";
 import type { IProductBranchScopeModel } from "@/models/Product";
@@ -19,6 +19,7 @@ import saleService from "@/services/sale-service";
 import { useDebounce } from "@/hook/useDebounce";
 import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
+import { DateToDateStringWithMonth } from "@/util/DateFormate";
 import AddSaleForm from "./AddSaleForm";
 
 type SaleFilterValues = Required<Pick<ISaleRequestModel, "search" | "startDate" | "endDate">>;
@@ -34,10 +35,7 @@ const toDate = (value: string) => (isCompleteDate(value) ? parse(value, DATE_VAL
 
 const currency = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 });
 
-const formatSaleDate = (value: string | null | undefined) => {
-    const date = value ? parse(value, DATE_VALUE_FORMAT, new Date()) : null;
-    return date && !Number.isNaN(date.getTime()) ? format(date, "dd MMM yyyy") : "-";
-};
+const formatSaleDate = (value: string | null | undefined) => DateToDateStringWithMonth(value);
 
 // Reports filter changes to the parent, debouncing the search text. Dates are only applied
 // once complete and in order, so half-typed input never reaches the API.
