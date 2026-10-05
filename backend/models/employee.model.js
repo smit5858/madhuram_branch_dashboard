@@ -34,6 +34,10 @@ const Employee = sequelize.define(
             type: DataTypes.STRING(15),
             allowNull: true,
         },
+        branchId: {
+            type: DataTypes.INTEGER,
+            allowNull: true,
+        },
         allowedBranch: {
             type: DataTypes.STRING,
             allowNull: true, 

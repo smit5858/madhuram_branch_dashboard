@@ -13,6 +13,12 @@ const seedAdmin = async () => {
             defaults: { isActive: true },
         });
 
+        // Default role for non-admin staff created from the Employee module
+        await Roles.findOrCreate({
+            where: { name: "Employee" },
+            defaults: { isActive: true },
+        });
+
         const [employee, created] = await Employee.findOrCreate({
             where: { email: "admin@madhuram.com" },
             defaults: {

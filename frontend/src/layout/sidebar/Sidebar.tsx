@@ -21,7 +21,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
     { path: "/products", name: "Products", icon: Package },
     { path: "/sales", name: "Sales", icon: ShoppingCart },
     { path: "/branch", name: "Branches", icon: Building2, roles: ["admin"] },
-    { path: "/users", name: "Users", icon: Users, roles: ["admin"] },
+    { path: "/employee", name: "Employees", icon: Users, roles: ["admin"] },
 ];
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "sidebar:collapsed";

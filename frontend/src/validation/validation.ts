@@ -25,3 +25,16 @@ export const branchSchema = Yup.object({
 	isActive: Yup.boolean().required(),
 	address: Yup.string().trim().max(500, "Address must be at most 500 characters").required("Address is required"),
 });
+
+// Password is required when creating; when editing, blank keeps the current one
+export const employeeSchema = (isEdit: boolean) => Yup.object({
+	name: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Name is required"),
+	email: Yup.string().trim().email("Enter a valid email address").max(255, "Email must be at most 255 characters").required("Email is required"),
+	phone: Yup.string().test("valid-phone", "Enter a valid phone number", (value) => !value || isValidPhoneNumber(value)),
+	password: isEdit
+		? Yup.string().min(6, "Password must be at least 6 characters").max(100, "Password must be at most 100 characters")
+		: Yup.string().min(6, "Password must be at least 6 characters").max(100, "Password must be at most 100 characters").required("Password is required"),
+	roleId: Yup.string().required("Role is required"),
+	branchId: Yup.string().required("Branch is required"),
+	isActive: Yup.boolean().required(),
+});
