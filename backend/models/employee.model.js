@@ -39,16 +39,16 @@ const Employee = sequelize.define(
             allowNull: true, 
         },
         tokenInvalidatedAt: {
-          type: DataTypes.DATE,
-          allowNull: true,
+            type: DataTypes.DATE,
+            allowNull: true,
         },
         refreshToken: {
-          type: DataTypes.TEXT,
-          allowNull: true,
+            type: DataTypes.TEXT,
+            allowNull: true,
         },
         deletedAt: {
-          type: DataTypes.DATE,
-          allowNull: true,
+            type: DataTypes.DATE,
+            allowNull: true,
         },
     },
     {

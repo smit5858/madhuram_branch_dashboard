@@ -5,6 +5,7 @@ import MainLayout from "@/layout/mainLayout/MainLayout";
 
 const Login = lazy(() => import('@/pages/Account/Login')); 
 const Sales = lazy(() => import('@/pages/Sales/Sales')); 
+const Branch = lazy(() => import('@/pages/Branch/Branch')); 
 
 const privateRoutes = (Element: any , props?: any, roles?: string[]) => {
     return <ProtectedRoute roles={roles} element={props ? <Element {...props} /> : <Element />} />
@@ -17,6 +18,7 @@ const routesConfig = [
             {path: '/', element: <Navigate to="/login" />},
             {path: '/login', element: <Login />},
             {path: '/sales', element: <MainLayout>{privateRoutes(Sales)}</MainLayout>},
+            {path: '/branch', element: <MainLayout>{privateRoutes(Branch)}</MainLayout>},
         ],
     }
 ];

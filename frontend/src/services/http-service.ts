@@ -6,13 +6,15 @@ import toast from 'react-hot-toast';
 
 axios.interceptors.request.use(
     (config:InternalAxiosRequestConfig) => {
-        const storeData = store.getState();
-        const token = `Token ${storeData?.auth?.token}`;
+        const token = store.getState()?.auth?.token;
 
         if (config.url) {
             config.url = getBaseURL(import.meta.env.VITE_APP_BASE_URL) + config.url;
         }
-        config.headers.set('Authorization', token);
+        // Backend auth middleware expects "Bearer <token>"
+        if (token) {
+            config.headers.set('Authorization', `Bearer ${token}`);
+        }
 
         return config;
     },

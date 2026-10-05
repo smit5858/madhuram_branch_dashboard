@@ -4,14 +4,16 @@ import { Provider } from 'react-redux';
 import { store } from "./store/store";
 import AppRouting from "./routes/AppRouting";
 
-const App = () => {
-    const queryClient = new QueryClient({
-        defaultOptions: {
-            queries: {
-                refetchOnWindowFocus: false,
-            },
+// Created once at module level so the query cache survives App re-renders
+const queryClient = new QueryClient({
+    defaultOptions: {
+        queries: {
+            refetchOnWindowFocus: false,
         },
-    });
+    },
+});
+
+const App = () => {
     return (
         <QueryClientProvider client={queryClient}>
             <Provider store={store}>

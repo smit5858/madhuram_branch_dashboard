@@ -19,3 +19,9 @@ export const loginSchema = Yup.object({
 	email: Yup.string().trim().email("Enter a valid email address").required("Email is required"),
 	password: Yup.string().required("Password is required"),
 });
+
+export const branchSchema = Yup.object({
+	name: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Name is required"),
+	isActive: Yup.boolean().required(),
+	address: Yup.string().trim().max(500, "Address must be at most 500 characters").required("Address is required"),
+});

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import clsx from "clsx";
-import { ChevronLeft, ChevronRight, Package, ShoppingCart, Users, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Package, ShoppingCart, Building2, Users, type LucideIcon } from "lucide-react";
 import LOGO from "@/assets/logo.jpg";
 import type { RootState } from "../../store/store";
 import { useSelector, useDispatch } from "react-redux";
@@ -20,6 +20,7 @@ interface SidebarItem {
 const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
     { path: "/products", name: "Products", icon: Package },
     { path: "/sales", name: "Sales", icon: ShoppingCart },
+    { path: "/branch", name: "Branches", icon: Building2, roles: ["admin"] },
     { path: "/users", name: "Users", icon: Users, roles: ["admin"] },
 ];
 
