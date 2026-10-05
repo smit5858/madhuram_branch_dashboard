@@ -20,7 +20,7 @@ export interface RoutePermission {
 }
 
 export interface AuthState {
-    userId: number | null;
+    userId: string | null;
     name: string | null;
     role: string | null;
     mail: string | null;
@@ -61,7 +61,7 @@ const authSlice = createSlice({
 
     reducers: {
         login: (state, action: PayloadAction<{
-            userId: number;
+            userId: string;
             name: string;
             role: string;
             mail: string;

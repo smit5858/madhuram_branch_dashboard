@@ -9,6 +9,9 @@ import { useMutation } from '@tanstack/react-query';
 import accountService from '@/services/account-service';
 import toast from 'react-hot-toast';
 import type { ILoginRequestModel, ILoginResponseModel } from "@/models/Account";
+import { useNavigate } from "react-router-dom";
+import { useDispatch } from "react-redux";
+import { login as setAuth } from "@/store/slices/authSlice";
 
 const services = [
     {
@@ -61,12 +64,25 @@ const CarIllustration = () => (
 );
 
 const Login = () => {
+    const navigate = useNavigate();
+    const dispatch = useDispatch();
     const { mutate: login, isPending: loginLoading } = useMutation({
         mutationFn: (values: ILoginRequestModel) => accountService.login(values),
         onSuccess: (response) => {
             if (response?.data?.status) {
                 const data: ILoginResponseModel = response.data.data;
+                dispatch(setAuth({
+                    userId: data.employee.id,
+                    name: data.employee.name,
+                    role: data.employee.roleName ?? '',
+                    mail: data.employee.email,
+                    phone: null,
+                    token: data.accessToken,
+                    refreshToken: data.refreshToken,
+                    allowedCity: data.employee.allowedBranch,
+                }));
                 toast.success(response.data.message || `Welcome, ${data.employee.name}`);
+                navigate("/sales");
             } else if (response) {
                 toast.error(response.data?.message || 'Internal server error. Please try again later.');
             }
