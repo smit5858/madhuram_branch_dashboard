@@ -52,6 +52,33 @@ export const productSchema = Yup.object({
 	branchId: Yup.string().required("Branch is required"),
 });
 
+export const MAX_SALE_AMOUNT = 1000000000;
+
+// Stock availability is checked by the form against the selected branch's stock, and again by the API
+export const saleSchema = Yup.object({
+	customerName: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Customer name is required"),
+	customerPhone: Yup.string()
+		.required("Customer phone number is required")
+		.test("valid-phone", "Enter a valid phone number", (value) => !value || isValidPhoneNumber(value)),
+	productId: Yup.string().required("Product is required"),
+	quantity: Yup.number()
+		.typeError("Quantity must be a number")
+		.integer("Quantity must be a whole number")
+		.min(1, "Quantity must be at least 1")
+		.max(MAX_PRODUCT_QUANTITY, "Quantity is too large")
+		.required("Quantity is required"),
+	sellingAmount: Yup.number()
+		.typeError("Selling amount must be a number")
+		.moreThan(0, "Selling amount must be greater than 0")
+		.max(MAX_SALE_AMOUNT, "Selling amount is too large")
+		.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
+		.required("Selling amount is required"),
+	saleDate: Yup.string()
+		.required("Sale date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	branchId: Yup.string().required("Branch is required"),
+});
+
 /** True for a complete, real "yyyy-MM-dd" date (DatePicker stores partial input as-is) */
 export const isCompleteDate = (value?: string) =>
 	!!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && isValid(parse(value, "yyyy-MM-dd", new Date()));

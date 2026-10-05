@@ -19,6 +19,7 @@
     "formik": "^2.4.9",
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^1.52.0",
+    "moment": "^2.31.0",
     "react": "^19.2.8",
     "react-day-picker": "^10.0.2",
     "react-dom": "^19.2.8",
