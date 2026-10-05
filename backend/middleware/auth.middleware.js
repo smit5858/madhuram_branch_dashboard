@@ -38,17 +38,40 @@ exports.authenticate = async (req, res, next) => {
     }
 };
 
+// Lower-cased name of the employee's role, or null when it has none or it is inactive
+const getActiveRoleName = async (employee) => {
+    const role = employee?.roleId ? await Roles.findByPk(employee.roleId) : null;
+    return role && role.isActive ? role.name.toLowerCase() : null;
+};
+
 // Use after authenticate. Allows the request only when the employee's role name
 // matches one of the given roles (case-insensitive), e.g. authorize("admin").
 exports.authorize = (...roles) => async (req, res, next) => {
     try {
-        const role = req.employee?.roleId ? await Roles.findByPk(req.employee.roleId) : null;
-        const roleName = role && role.isActive ? role.name.toLowerCase() : null;
+        const roleName = await getActiveRoleName(req.employee);
 
         if (!roleName || !roles.map((r) => r.toLowerCase()).includes(roleName)) {
             return sendError(res, "You do not have permission to perform this action", null, 403);
         }
 
+        next();
+    } catch (error) {
+        return sendError(res, error.message, null, 500);
+    }
+};
+
+// Use after authenticate. Sets req.branchScope = { isAdmin, branchId } from the logged-in
+// employee's record, never from the request: admins can reach every branch (branchId null),
+// everyone else only their assigned branch.
+exports.loadBranchScope = async (req, res, next) => {
+    try {
+        const isAdmin = (await getActiveRoleName(req.employee)) === "admin";
+
+        if (!isAdmin && !req.employee.branchId) {
+            return sendError(res, "Your account is not assigned to a branch. Contact your administrator.", null, 400);
+        }
+
+        req.branchScope = { isAdmin, branchId: isAdmin ? null : req.employee.branchId };
         next();
     } catch (error) {
         return sendError(res, error.message, null, 500);
