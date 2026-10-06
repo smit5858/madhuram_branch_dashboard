@@ -4,7 +4,7 @@ const productController = require('@/controllers/product.controller')
 
 const { authenticate, loadBranchScope } = require('@/middleware/auth.middleware')
 
-// Admins see every branch's stock, everyone else only their assigned branch (enforced in the controller)
+// Everyone sees every branch's stock; non-admins can only change their assigned branch (enforced in the controller)
 router.use(authenticate, loadBranchScope)
 
 router.get('/branches', productController.branches)

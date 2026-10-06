@@ -5,21 +5,25 @@ import { Dialog } from "@/components/Dialog";
 import { Button } from "@/components/Button";
 import { Select, type SelectOption } from "@/components/formik-fields/Select";
 import productService from "@/services/product-service";
-import type { IProductModel } from "@/models/Product";
+import type { IProductBranchScopeModel, IProductModel } from "@/models/Product";
 
 const ALL_BRANCHES = "all";
 
 interface DeleteProductDialogProps {
     product: IProductModel | null;
-    isAdmin: boolean;
+    scope: IProductBranchScopeModel;
     onClose: () => void;
     onDeleted: () => void;
 }
 
-// Branch members only ever have their own branch's stock in the row, so they delete that.
+// Branch members can only delete their own branch's stock (the row also shows other branches).
 // Admins choose one branch's stock or the whole product.
-const DeleteProductDialog = ({ product, isAdmin, onClose, onDeleted }: DeleteProductDialogProps) => {
-    const stocks = useMemo(() => product?.stocks ?? [], [product]);
+const DeleteProductDialog = ({ product, scope, onClose, onDeleted }: DeleteProductDialogProps) => {
+    const { isAdmin } = scope;
+    const stocks = useMemo(
+        () => (product?.stocks ?? []).filter((s) => isAdmin || s.branchId === scope.branchId),
+        [product, isAdmin, scope.branchId],
+    );
     const [target, setTarget] = useState("");
     // Reset the choice whenever a different product is opened, defaulting to the first branch
     const [lastProductId, setLastProductId] = useState<number | null>(null);

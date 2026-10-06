@@ -4,6 +4,7 @@ import { useSelector } from "react-redux";
 import { useQuery } from "@tanstack/react-query";
 import { CircleAlert, Plus, RotateCcw } from "lucide-react";
 import { parse } from "date-fns";
+import toast from "react-hot-toast";
 import type { AxiosResponse } from "axios";
 import type { IProductBranchScopeModel, IProductModel, IProductRequestModel, IProductResponseModel } from "@/models/Product";
 import type { ApiResponseModel } from "@/services/api";
@@ -138,7 +139,7 @@ const SerialNumbersCell = ({ product, search }: { product: IProductModel; search
     );
 };
 
-// One quantity column per visible branch: every branch for admins, only their own for members
+// One quantity column per branch; every user sees all branches
 const buildColumns = (scope: IProductBranchScopeModel, search: string): TableColumn<IProductModel>[] => [
     // Running number (1, 2, 3 ... continuing across pages), not the database id
     { id: "srNo", label: "Sr no.", width: 80, renderCell: (_value, _row, _column, _rowIndex, serialNo) => serialNo },
@@ -199,7 +200,14 @@ const Products = () => {
     });
 
     const columns = useMemo(() => (scope ? buildColumns(scope, filters.search) : []), [scope, filters.search]);
-    const ownBranchName = scope && !scope.isAdmin ? scope.branch[0]?.name : null;
+    const ownBranchName = scope && !scope.isAdmin ? scope.branch.find((b) => b.id === scope.branchId)?.name : null;
+
+    // Members can only change their own branch's stock, which this product may not have
+    const canChange = (product: IProductModel) => {
+        if (scope?.isAdmin || product.stocks.some((s) => s.branchId === scope?.branchId)) return true;
+        toast.error(`This product has no stock in ${ownBranchName ?? "your branch"}`);
+        return false;
+    };
 
     if (isScopeLoading) {
         return (
@@ -236,7 +244,7 @@ const Products = () => {
             <p className="-mt-3 text-xs text-slate-500">
                 {scope.isAdmin
                     ? "Stock quantity is shown separately for each branch."
-                    : <>Showing stock for your branch: <span className="font-semibold text-slate-700">{ownBranchName}</span></>}
+                    : <>Stock is shown for every branch. You can only change stock in your branch: <span className="font-semibold text-slate-700">{ownBranchName}</span></>}
             </p>
 
             {/* User and filters are part of the key so changing them refetches the table */}
@@ -254,9 +262,9 @@ const Products = () => {
                 refreshKey={refreshKey}
                 emptyMessage={filters.search || filters.startDate || filters.endDate ? "No products match your filters" : "No products found"}
                 isEdit
-                onEdit={(product) => setForm({ open: true, product })}
+                onEdit={(product) => canChange(product) && setForm({ open: true, product })}
                 isDelete
-                onDelete={setProductToDelete}
+                onDelete={(product) => canChange(product) && setProductToDelete(product)}
             />
 
             <AddProductForm
@@ -269,7 +277,7 @@ const Products = () => {
 
             <DeleteProductDialog
                 product={productToDelete}
-                isAdmin={scope.isAdmin}
+                scope={scope}
                 onClose={() => setProductToDelete(null)}
                 onDeleted={reloadTable}
             />

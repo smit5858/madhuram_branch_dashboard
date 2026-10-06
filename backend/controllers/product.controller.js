@@ -156,18 +156,18 @@ const sendProductError = (res, error) => {
     return sendError(res, error.message, null, 500);
 };
 
-// Branches the employee may see, used for the table's branch columns and the branch dropdown
+// Every branch, used for the table's branch columns and the branch dropdown. Everyone can view
+// every branch's stock; branchId tells a member which branch they may change.
 exports.branches = async (req, res) => {
     try {
         const { isAdmin, branchId } = req.branchScope;
 
         const branches = await Branch.findAll({
-            where: isAdmin ? {} : { id: branchId },
             attributes: ["id", "name", "isActive"],
             order: [["name", "ASC"]],
         });
 
-        if (!isAdmin && branches.length === 0) {
+        if (!isAdmin && !branches.some((b) => b.id === branchId)) {
             return sendError(res, "Your assigned branch no longer exists. Contact your administrator.", null, 400);
         }
 
@@ -196,9 +196,8 @@ exports.product = async (req, res) => {
             ];
         }
 
-        // Branch members only ever get rows for their own branch
+        // Everyone sees every branch's stock; changes stay limited to a member's own branch
         const stockWhere = {};
-        if (!scope.isAdmin) stockWhere.branchId = scope.branchId;
 
         // Date range applies to when the branch stock was last added/updated (inclusive days)
         const startDate = req.query.startDate ? parseDate(req.query.startDate) : null;
@@ -218,7 +217,7 @@ exports.product = async (req, res) => {
             }
         }
 
-        // required: only products with at least one matching (visible) stock row are listed,
+        // required: only products with at least one matching stock row are listed,
         // and only those stock rows are returned
         const { count, rows } = await Product.findAndCountAll({
             where,
