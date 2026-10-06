@@ -15,6 +15,10 @@ const createProduct = async (requestBody: IProductCreateModel): Promise<AxiosRes
 const updateProduct = async (id: number, requestBody: IProductCreateModel): Promise<AxiosResponse<ApiResponseModel<null>>> =>
     httpService.put<ApiResponseModel<null>>(`api/product/${id}`, requestBody);
 
+/** Which of these serial numbers already exist (in stock anywhere or sold) */
+const checkSerials = async (serialNumbers: string[]): Promise<AxiosResponse<ApiResponseModel<{ existing: string[] }>>> =>
+    httpService.post<ApiResponseModel<{ existing: string[] }>>(`api/product/serials/check`, { serialNumbers });
+
 /** Without branchId (admin only) the product is removed from every branch */
 const deleteProduct = async (id: number, branchId?: number): Promise<AxiosResponse<ApiResponseModel<null>>> =>
     httpService.delete<ApiResponseModel<null>>(`api/product/${id}`, { params: { branchId } });
@@ -25,4 +29,5 @@ export default {
     createProduct,
     updateProduct,
     deleteProduct,
+    checkSerials,
 };

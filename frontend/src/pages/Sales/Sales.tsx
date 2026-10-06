@@ -21,6 +21,7 @@ import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
 import { DateToDateStringWithMonth } from "@/util/DateFormate";
 import AddSaleForm from "./AddSaleForm";
+import SalesSummary from "./SalesSummary";
 
 type SaleFilterValues = Required<Pick<ISaleRequestModel, "search" | "startDate" | "endDate">>;
 
@@ -69,7 +70,7 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
                             <Field
                                 id="search"
                                 name="search"
-                                placeholder="Search customer, phone or product..."
+                                placeholder="Search customer, phone, product or serial no..."
                                 component={Input}
                             />
                         </div>
@@ -121,10 +122,19 @@ const buildColumns = (isAdmin: boolean): TableColumn<ISaleModel>[] => [
         sortable: true,
         className: "min-w-48",
         renderCell: (name: string, row) => (
-            <span>
-                {name}
-                {row.quantity > 1 && <span className="ml-1.5 text-xs text-slate-500">× {row.quantity.toLocaleString("en-IN")}</span>}
-            </span>
+            <div className="flex flex-col gap-0.5">
+                <span>
+                    {name}
+                    {row.quantity > 1 && <span className="ml-1.5 text-xs text-slate-500">× {row.quantity.toLocaleString("en-IN")}</span>}
+                </span>
+                {row.serialNumbers.length > 0 && (
+                    <span className="text-xs text-slate-500" title={row.serialNumbers.join(", ")}>
+                        SN: {row.serialNumbers.length > 3
+                            ? `${row.serialNumbers.slice(0, 3).join(", ")} +${row.serialNumbers.length - 3} more`
+                            : row.serialNumbers.join(", ")}
+                    </span>
+                )}
+            </div>
         ),
     },
     { id: "quantity", label: "Qty", align: "center", sortable: true, visible: false },
@@ -212,6 +222,8 @@ const Sales = () => {
 
     return (
         <div className="p-6 bg-white rounded-xl shadow-md flex flex-col gap-6">
+            <SalesSummary isAdmin={scope.isAdmin} filters={filters} refreshKey={refreshKey} />
+
             <SaleFilters onChange={setFilters} onAdd={() => setForm({ open: true, sale: null })} />
 
             <p className="-mt-3 text-xs text-slate-500">

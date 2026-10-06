@@ -1,5 +1,5 @@
-import { Field, Form, Formik, useFormikContext } from "formik";
-import { useEffect, useMemo, useRef } from "react";
+import { Field, Form, Formik, useField, useFormikContext } from "formik";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
@@ -60,6 +60,83 @@ const BranchProductSync = ({ sale }: { sale?: ISaleModel | null }) => {
     return null;
 };
 
+// Picking another product clears the chosen serial numbers; going back to the sale's own
+// product and branch while editing restores them.
+const ProductSerialSync = ({ sale }: { sale?: ISaleModel | null }) => {
+    const { values, setFieldValue } = useFormikContext<ISaleFormValues>();
+    const previous = useRef(`${values.branchId}:${values.productId}`);
+
+    useEffect(() => {
+        const key = `${values.branchId}:${values.productId}`;
+        if (key === previous.current) return;
+        previous.current = key;
+        const isOriginal = !!sale && String(sale.branchId) === values.branchId && String(sale.productId) === values.productId;
+        setFieldValue("serialNumbers", isOriginal ? sale.serialNumbers : [], false);
+        if (isOriginal) setFieldValue("quantity", sale.quantity, false);
+    }, [values.branchId, values.productId, sale, setFieldValue]);
+
+    return null;
+};
+
+// Checkbox list of the units in stock; the sale's quantity is the number ticked
+const SerialNumberPicker = ({ options }: { options: string[] }) => {
+    const { setFieldValue } = useFormikContext<ISaleFormValues>();
+    const [field, meta, helpers] = useField<string[]>({
+        name: "serialNumbers",
+        validate: (value: string[]) => (value.length === 0 ? "Select the serial number of each unit sold" : undefined),
+    });
+    const [filter, setFilter] = useState("");
+
+    const selected = field.value;
+    const shown = filter ? options.filter((sn) => sn.toLowerCase().includes(filter.toLowerCase())) : options;
+
+    const toggle = (sn: string) => {
+        const next = selected.includes(sn) ? selected.filter((x) => x !== sn) : [...selected, sn];
+        helpers.setValue(next);
+        helpers.setTouched(true, false);
+        setFieldValue("quantity", next.length, false);
+    };
+
+    const error = meta.touched ? meta.error : undefined;
+
+    return (
+        <div className="flex flex-col gap-1.5">
+            <div className={`flex flex-col gap-2 rounded-xl p-3 ${error ? "bg-red-50" : "bg-gray-100"}`}>
+                <div className="flex items-center justify-between gap-2">
+                    <span className={`text-xs font-medium ${error ? "text-red-500" : "text-gray-600"}`}>Serial Numbers Sold</span>
+                    <span className="text-xs text-slate-500">
+                        {selected.length.toLocaleString("en-IN")} selected · {options.length.toLocaleString("en-IN")} in stock
+                    </span>
+                </div>
+                {options.length > 6 && (
+                    <input
+                        type="search"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                        placeholder="Find serial number..."
+                        className="h-8 rounded-lg border border-slate-200 bg-white px-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                )}
+                <div className="flex max-h-44 flex-col gap-0.5 overflow-y-auto">
+                    {shown.length === 0 && <span className="py-2 text-center text-xs text-slate-400">No serial numbers found</span>}
+                    {shown.map((sn) => (
+                        <label key={sn} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-gray-900 hover:bg-white">
+                            <input
+                                type="checkbox"
+                                checked={selected.includes(sn)}
+                                onChange={() => toggle(sn)}
+                                className="size-4 accent-blue-600"
+                            />
+                            {sn}
+                        </label>
+                    ))}
+                </div>
+            </div>
+            {error && <p className="px-1 text-xs text-red-500">{error}</p>}
+        </div>
+    );
+};
+
 // Product picker plus quantity, both checked against the selected branch's stock
 const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
     const { values } = useFormikContext<ISaleFormValues>();
@@ -83,6 +160,13 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
     const available = selected ? availableOf(selected.id, selected.quantity) : undefined;
     const originalMissing = !!sale && String(sale.branchId) === values.branchId
         && !products.some((p) => p.id === sale.productId);
+
+    // Units of the selected product that can be sold; while editing, this sale's own units count too
+    const serialOptions = useMemo(() => {
+        if (!selected?.hasSerialNumber) return [];
+        const own = sale && sale.productId === selected.id && String(sale.branchId) === values.branchId ? sale.serialNumbers : [];
+        return [...new Set([...own, ...selected.serialNumbers])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    }, [selected, sale, values.branchId]);
 
     const validateQuantity = (value: number | "") =>
         available !== undefined && value !== "" && Number(value) > available
@@ -112,8 +196,10 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
                     </p>
                 )}
             </div>
+            {selected?.hasSerialNumber && <SerialNumberPicker options={serialOptions} />}
             <div className="grid gap-4 sm:grid-cols-2">
-                <div className="flex flex-col gap-1">
+                {/* Serial-tracked products take their quantity from the serial numbers ticked above */}
+                <div className={selected?.hasSerialNumber ? "hidden" : "flex flex-col gap-1"}>
                     <Field
                         id="quantity"
                         name="quantity"
@@ -162,6 +248,7 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
         customerPhone: sale?.customerPhone ?? "",
         productId: sale?.productId ? String(sale.productId) : "",
         quantity: sale?.quantity ?? 1,
+        serialNumbers: sale?.serialNumbers ?? [],
         sellingAmount: sale?.sellingAmount ?? "",
         saleDate: sale?.saleDate ?? format(today, DATE_VALUE_FORMAT),
         // Branch members are always on their own branch
@@ -175,6 +262,8 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
                 customerPhone: values.customerPhone,
                 productId: Number(values.productId),
                 quantity: Number(values.quantity),
+                // Empty for products without serial numbers (ProductSerialSync clears it on product change)
+                serialNumbers: values.serialNumbers,
                 sellingAmount: Number(values.sellingAmount),
                 saleDate: values.saleDate,
                 branchId: Number(values.branchId),
@@ -203,6 +292,7 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
             >
                 <Form className="flex flex-col gap-4" noValidate>
                     {isAdmin && <BranchProductSync sale={sale} />}
+                    <ProductSerialSync sale={sale} />
                     <div className="grid gap-4 sm:grid-cols-2">
                         <Field
                             id="customerName"

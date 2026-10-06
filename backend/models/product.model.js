@@ -14,6 +14,13 @@ const Product = sequelize.define(
             type: DataTypes.STRING,
             allowNull: false,
         },
+        // Each unit of a serial-tracked product has its own serial number (see product_serial).
+        // Chosen when the product is first added.
+        hasSerialNumber: {
+            type: DataTypes.BOOLEAN,
+            allowNull: false,
+            defaultValue: false,
+        },
     },
     {
         tableName: "product",

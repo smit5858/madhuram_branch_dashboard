@@ -8,7 +8,8 @@
     "dev": "nodemon server.js",
     "seed:admin": "node seeders/admin.seed.js",
     "migrate:branch-address": "node migrations/add-branch-address.js",
-    "migrate:employee-branch": "node migrations/add-employee-branch.js"
+    "migrate:employee-branch": "node migrations/add-employee-branch.js",
+    "migrate:product-serial-numbers": "node migrations/add-product-serial-numbers.js"
   },
   "overrides": {
     "uuid": "^11.0.0"

@@ -1,14 +1,27 @@
 const { Op } = require("sequelize");
 const sequelize = require("@/config/db");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Product, ProductStock, Branch } = require("@/models/index");
+const { Product, ProductStock, ProductSerial, Branch, Sale } = require("@/models/index");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
+//
+// Serial numbers: a product either has none (stock is a plain quantity) or tracks one serial
+// number per unit (product.hasSerialNumber). For tracked products every in-stock unit is a
+// product_serial row and the branch's quantity is always the number of those rows.
 
 const MAX_QUANTITY = 1000000000;
+const MAX_SERIALS = 1000;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const NOT_FOUND = "Product not found";
+
+// Thrown inside a transaction so it rolls back, then turned into an API error
+class ProductError extends Error {
+    constructor(message, status = 400) {
+        super(message);
+        this.status = status;
+    }
+}
 
 const parseId = (value) => {
     const id = Number(value);
@@ -37,6 +50,54 @@ const parseQuantity = (quantity) => {
     if (n < 0) return { error: "Quantity cannot be negative" };
     if (n > MAX_QUANTITY) return { error: `Quantity must be at most ${MAX_QUANTITY.toLocaleString("en-IN")}` };
     return { value: n };
+};
+
+// List of serial numbers, trimmed, blanks dropped. Duplicates are refused (case-insensitive,
+// like the database's unique index). Missing means an empty list.
+const parseSerialNumbers = (list) => {
+    if (list === undefined || list === null) return { value: [] };
+    if (!Array.isArray(list) || list.some((s) => typeof s !== "string")) return { error: "Invalid serial numbers" };
+
+    const serials = list.map((s) => s.trim()).filter(Boolean);
+    if (serials.length > MAX_SERIALS) return { error: `At most ${MAX_SERIALS} serial numbers at a time` };
+    const tooLong = serials.find((s) => s.length > 100);
+    if (tooLong) return { error: `Serial number "${tooLong.slice(0, 20)}..." is longer than 100 characters` };
+
+    const seen = new Set();
+    const repeated = serials.find((s) => (seen.has(s.toLowerCase()) ? true : (seen.add(s.toLowerCase()), false)));
+    if (repeated) return { error: `Serial number ${repeated} is entered more than once` };
+
+    return { value: serials };
+};
+
+const listForMessage = (serials) => (serials.length > 5 ? `${serials.slice(0, 5).join(", ")} and ${serials.length - 5} more` : serials.join(", "));
+
+// Which of these serial numbers already exist anywhere: in stock (any product or branch) or
+// recorded on a sale. A serial number is never reused once it exists.
+const findExistingSerials = async (serials, transaction) => {
+    if (serials.length === 0) return [];
+
+    const inStock = await ProductSerial.findAll({ where: { serialNumber: serials }, attributes: ["serialNumber"], transaction });
+
+    // sale.serialNumbers is a JSON array, so match each value with its surrounding quotes
+    const escapeLike = (value) => value.replace(/[\\%_]/g, "\\$&");
+    const sales = await Sale.findAll({
+        where: { [Op.or]: serials.map((sn) => ({ serialNumbers: { [Op.like]: `%${escapeLike(JSON.stringify(sn))}%` } })) },
+        attributes: ["serialNumbers"],
+        transaction,
+    });
+    const sold = new Set(sales.flatMap((sale) => sale.serialNumbers).map((sn) => sn.toLowerCase()));
+
+    const existing = new Set([...inStock.map((r) => r.serialNumber.toLowerCase()), ...sold]);
+    return serials.filter((sn) => existing.has(sn.toLowerCase()));
+};
+
+// Refuses serial numbers that already exist (in stock or sold)
+const assertSerialsFree = async (serials, transaction) => {
+    const existing = await findExistingSerials(serials, transaction);
+    if (existing.length > 0) {
+        throw new ProductError(`Serial number already exists: ${listForMessage(existing)}`, 409);
+    }
 };
 
 // Branch members always act on their own branch: a branchId they send is accepted only when
@@ -70,17 +131,29 @@ const removeIfOrphaned = async (productId, transaction) => {
     if (remaining === 0) await Product.destroy({ where: { id: productId }, transaction });
 };
 
-const toProductResponse = (product) => {
+// serialsByStock: Map of "productId:branchId" -> in-stock serial numbers
+const toProductResponse = (product, serialsByStock) => {
     const stocks = (product.stocks ?? []).map((s) => ({
         id: s.id,
         branchId: s.branchId,
         branchName: s.Branch?.name ?? null,
         quantity: s.quantity,
+        serialNumbers: serialsByStock.get(`${product.id}:${s.branchId}`) ?? [],
         updatedAt: s.updatedAt,
     }));
     const lastUpdated = stocks.reduce((latest, s) => (!latest || s.updatedAt > latest ? s.updatedAt : latest), null);
 
-    return { id: product.id, name: product.name, updatedAt: lastUpdated ?? product.updatedAt, stocks };
+    return { id: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, updatedAt: lastUpdated ?? product.updatedAt, stocks };
+};
+
+const sendProductError = (res, error) => {
+    if (error instanceof ProductError) return sendError(res, error.message, null, error.status);
+    if (error.name === "SequelizeUniqueConstraintError") {
+        // Two people saving at once: either the same new product name or the same serial number
+        const isSerial = Object.keys(error.fields ?? {}).some((f) => f.toLowerCase().includes("serial"));
+        return sendError(res, isSerial ? "One of these serial numbers was just added. Please check and try again." : "A product with this name already exists", null, 409);
+    }
+    return sendError(res, error.message, null, 500);
 };
 
 // Branches the employee may see, used for the table's branch columns and the branch dropdown
@@ -111,10 +184,16 @@ exports.product = async (req, res) => {
         const pageSize = Math.max(parseInt(req.query.pageSize, 10) || 10, 1);
         const offset = (page - 1) * pageSize;
 
+        // Search matches the product name or any in-stock serial number the user can see
         const where = {};
         const search = req.query.search?.trim();
         if (search) {
-            where.name = { [Op.like]: `%${search}%` };
+            const pattern = sequelize.escape(`%${search}%`);
+            const branchFilter = scope.isAdmin ? "" : ` AND branchId = ${Number(scope.branchId)}`;
+            where[Op.or] = [
+                { name: { [Op.like]: `%${search}%` } },
+                { id: { [Op.in]: sequelize.literal(`(SELECT productId FROM product_serial WHERE serialNumber LIKE ${pattern}${branchFilter})`) } },
+            ];
         }
 
         // Branch members only ever get rows for their own branch
@@ -143,7 +222,7 @@ exports.product = async (req, res) => {
         // and only those stock rows are returned
         const { count, rows } = await Product.findAndCountAll({
             where,
-            attributes: ["id", "name", "updatedAt"],
+            attributes: ["id", "name", "hasSerialNumber", "updatedAt"],
             include: [{
                 model: ProductStock,
                 as: "stocks",
@@ -158,8 +237,23 @@ exports.product = async (req, res) => {
             distinct: true,
         });
 
+        // Serial numbers of this page's tracked products, loaded separately to keep the main query small
+        const trackedIds = rows.filter((p) => p.hasSerialNumber).map((p) => p.id);
+        const serials = trackedIds.length === 0 ? [] : await ProductSerial.findAll({
+            where: { productId: trackedIds, ...(scope.isAdmin ? {} : { branchId: scope.branchId }) },
+            attributes: ["productId", "branchId", "serialNumber"],
+            order: [["serialNumber", "ASC"]],
+            raw: true,
+        });
+        const serialsByStock = new Map();
+        for (const s of serials) {
+            const key = `${s.productId}:${s.branchId}`;
+            if (!serialsByStock.has(key)) serialsByStock.set(key, []);
+            serialsByStock.get(key).push(s.serialNumber);
+        }
+
         const data = {
-            product: rows.map(toProductResponse),
+            product: rows.map((p) => toProductResponse(p, serialsByStock)),
             pagination: {
                 total: count,
                 page,
@@ -176,17 +270,20 @@ exports.product = async (req, res) => {
 
 // Adds stock to a branch. Products are matched by name (case-insensitive), so adding an
 // existing product to a branch that already stocks it increases that branch's quantity
-// instead of creating a duplicate record.
+// instead of creating a duplicate record. Serial-tracked products take one serial number per
+// unit instead of a quantity; whether a product is tracked is fixed when it is first added.
 exports.createProduct = async (req, res) => {
     try {
         const scope = req.branchScope;
-        const { name, quantity, branchId: requestedBranchId } = req.body || {};
+        // Only admins add products; branch members can still edit and sell their branch's stock
+        if (!scope.isAdmin) return sendError(res, "Only an admin can add products", null, 403);
+        const { name, quantity, hasSerialNumber, serialNumbers, branchId: requestedBranchId } = req.body || {};
 
         const parsedName = parseName(name);
         if (parsedName.error) return sendError(res, parsedName.error, null, 400);
 
-        const parsedQuantity = parseQuantity(quantity);
-        if (parsedQuantity.error) return sendError(res, parsedQuantity.error, null, 400);
+        const parsedSerials = parseSerialNumbers(serialNumbers);
+        if (parsedSerials.error) return sendError(res, parsedSerials.error, null, 400);
 
         const resolved = resolveBranchId(scope, requestedBranchId);
         if (resolved.error) return sendError(res, resolved.error, null, resolved.status);
@@ -196,11 +293,29 @@ exports.createProduct = async (req, res) => {
         if (branchError) return sendError(res, branchError, null, 400);
 
         const result = await sequelize.transaction(async (transaction) => {
-            const [product] = await Product.findOrCreate({
+            const [product, isNewProduct] = await Product.findOrCreate({
                 where: { name: parsedName.value },
-                defaults: { name: parsedName.value },
+                defaults: { name: parsedName.value, hasSerialNumber: hasSerialNumber === true },
                 transaction,
             });
+
+            let added;
+            if (product.hasSerialNumber) {
+                if (parsedSerials.value.length === 0) {
+                    throw new ProductError(isNewProduct
+                        ? "Enter at least one serial number"
+                        : `${product.name} uses serial numbers. Enter one serial number for each unit.`);
+                }
+                await assertSerialsFree(parsedSerials.value, transaction);
+                added = parsedSerials.value.length;
+            } else {
+                if (parsedSerials.value.length > 0) {
+                    throw new ProductError(`${product.name} doesn't use serial numbers. Enter a quantity instead.`);
+                }
+                const parsedQuantity = parseQuantity(quantity);
+                if (parsedQuantity.error) throw new ProductError(parsedQuantity.error);
+                added = parsedQuantity.value;
+            }
 
             const stock = await ProductStock.findOne({
                 where: { productId: product.id, branchId },
@@ -208,27 +323,26 @@ exports.createProduct = async (req, res) => {
                 lock: transaction.LOCK.UPDATE,
             });
 
-            if (stock) {
-                const newQuantity = stock.quantity + parsedQuantity.value;
-                if (newQuantity > MAX_QUANTITY) return { overflow: true };
-                await stock.update({ quantity: newQuantity }, { transaction });
-                return { product, stock, merged: true };
+            const newQuantity = (stock?.quantity ?? 0) + added;
+            if (newQuantity > MAX_QUANTITY) throw new ProductError(`Total quantity would exceed ${MAX_QUANTITY.toLocaleString("en-IN")}`);
+
+            if (product.hasSerialNumber) {
+                await ProductSerial.bulkCreate(
+                    parsedSerials.value.map((serialNumber) => ({ productId: product.id, branchId, serialNumber })),
+                    { transaction },
+                );
             }
 
-            const created = await ProductStock.create(
-                { productId: product.id, branchId, quantity: parsedQuantity.value },
-                { transaction },
-            );
-            return { product, stock: created, merged: false };
+            const saved = stock
+                ? await stock.update({ quantity: newQuantity }, { transaction })
+                : await ProductStock.create({ productId: product.id, branchId, quantity: newQuantity }, { transaction });
+            return { product, stock: saved, merged: !!stock || !isNewProduct, added };
         });
-
-        if (result.overflow) {
-            return sendError(res, `Total quantity would exceed ${MAX_QUANTITY.toLocaleString("en-IN")}`, null, 400);
-        }
 
         const data = {
             productId: result.product.id,
             name: result.product.name,
+            hasSerialNumber: result.product.hasSerialNumber,
             branchId,
             quantity: result.stock.quantity,
         };
@@ -237,25 +351,21 @@ exports.createProduct = async (req, res) => {
             ? sendSuccess(res, `Stock added to existing product. New quantity: ${result.stock.quantity}`, data, 200)
             : sendSuccess(res, "Product added successfully", data, 201);
     } catch (error) {
-        if (error.name === "SequelizeUniqueConstraintError") {
-            return sendError(res, "This product was just added by someone else. Please try again.", null, 409);
-        }
-        return sendError(res, error.message, null, 500);
+        return sendProductError(res, error);
     }
 };
 
-// Sets the quantity of one branch's stock. Only admins can rename a product (the name is
-// shared by every branch) or set stock for a branch that doesn't have the product yet.
+// Sets one branch's stock. Plain products take a quantity; serial-tracked products take the
+// full list of that branch's in-stock serial numbers (missing ones are removed, new ones added).
+// Only admins can rename a product (the name is shared by every branch) or set stock for a
+// branch that doesn't have the product yet.
 exports.updateProduct = async (req, res) => {
     try {
         const scope = req.branchScope;
         const id = parseId(req.params.id);
         if (!id) return sendError(res, "Invalid product id", null, 400);
 
-        const { name, quantity, branchId: requestedBranchId } = req.body || {};
-
-        const parsedQuantity = parseQuantity(quantity);
-        if (parsedQuantity.error) return sendError(res, parsedQuantity.error, null, 400);
+        const { name, quantity, serialNumbers, branchId: requestedBranchId } = req.body || {};
 
         const resolved = resolveBranchId(scope, requestedBranchId);
         if (resolved.error) return sendError(res, resolved.error, null, resolved.status);
@@ -263,6 +373,17 @@ exports.updateProduct = async (req, res) => {
 
         const product = await Product.findByPk(id);
         if (!product) return sendError(res, NOT_FOUND, null, 404);
+
+        let parsedQuantity = null;
+        let parsedSerials = null;
+        if (product.hasSerialNumber) {
+            if (!Array.isArray(serialNumbers)) return sendError(res, "Serial numbers are required for this product", null, 400);
+            parsedSerials = parseSerialNumbers(serialNumbers);
+            if (parsedSerials.error) return sendError(res, parsedSerials.error, null, 400);
+        } else {
+            parsedQuantity = parseQuantity(quantity);
+            if (parsedQuantity.error) return sendError(res, parsedQuantity.error, null, 400);
+        }
 
         const stock = await ProductStock.findOne({ where: { productId: id, branchId } });
 
@@ -287,22 +408,39 @@ exports.updateProduct = async (req, res) => {
         const saved = await sequelize.transaction(async (transaction) => {
             if (newName !== product.name) await product.update({ name: newName }, { transaction });
 
-            if (stock) return stock.update({ quantity: parsedQuantity.value }, { transaction });
-            return ProductStock.create({ productId: id, branchId, quantity: parsedQuantity.value }, { transaction });
+            let newQuantity = parsedQuantity?.value;
+            if (product.hasSerialNumber) {
+                const current = await ProductSerial.findAll({ where: { productId: id, branchId }, transaction, lock: transaction.LOCK.UPDATE });
+                const wanted = new Set(parsedSerials.value.map((s) => s.toLowerCase()));
+                const kept = new Set(current.map((s) => s.serialNumber.toLowerCase()));
+
+                const removed = current.filter((s) => !wanted.has(s.serialNumber.toLowerCase()));
+                const added = parsedSerials.value.filter((s) => !kept.has(s.toLowerCase()));
+
+                if (removed.length > 0) {
+                    await ProductSerial.destroy({ where: { id: removed.map((s) => s.id) }, transaction });
+                }
+                await assertSerialsFree(added, transaction);
+                if (added.length > 0) {
+                    await ProductSerial.bulkCreate(added.map((serialNumber) => ({ productId: id, branchId, serialNumber })), { transaction });
+                }
+                newQuantity = parsedSerials.value.length;
+            }
+
+            if (stock) return stock.update({ quantity: newQuantity }, { transaction });
+            return ProductStock.create({ productId: id, branchId, quantity: newQuantity }, { transaction });
         });
 
-        const data = { productId: product.id, name: product.name, branchId, quantity: saved.quantity };
+        const data = { productId: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, branchId, quantity: saved.quantity };
         return sendSuccess(res, "Product updated successfully", data, 200);
     } catch (error) {
-        if (error.name === "SequelizeUniqueConstraintError") {
-            return sendError(res, "A product with this name already exists", null, 409);
-        }
-        return sendError(res, error.message, null, 500);
+        return sendProductError(res, error);
     }
 };
 
 // Hard delete. With ?branchId only that branch's stock is removed; admins can omit it to
 // delete the product from every branch. Branch members can only remove their own branch's stock.
+// In-stock serial numbers go with the stock; sold ones stay on their sales.
 exports.deleteProduct = async (req, res) => {
     try {
         const scope = req.branchScope;
@@ -324,6 +462,7 @@ exports.deleteProduct = async (req, res) => {
 
         if (deleteEverywhere) {
             await sequelize.transaction(async (transaction) => {
+                await ProductSerial.destroy({ where: { productId: id }, transaction });
                 await ProductStock.destroy({ where: { productId: id }, transaction });
                 await product.destroy({ transaction });
             });
@@ -336,11 +475,36 @@ exports.deleteProduct = async (req, res) => {
         }
 
         await sequelize.transaction(async (transaction) => {
+            await ProductSerial.destroy({ where: { productId: id, branchId }, transaction });
             await stock.destroy({ transaction });
             await removeIfOrphaned(id, transaction);
         });
 
         return sendSuccess(res, "Product stock deleted successfully", null, 200);
+    } catch (error) {
+        return sendError(res, error.message, null, 500);
+    }
+};
+
+// Lets the form flag serial numbers that already exist (in stock or sold) while they're typed.
+// Body: { serialNumbers: string[] }. Returns { existing: string[] }. Saving checks again.
+exports.checkSerials = async (req, res) => {
+    try {
+        const parsed = parseSerialNumbers(req.body?.serialNumbers);
+        // Repeats within the list are reported by the form itself; check each value once here
+        const unique = parsed.error ? [] : parsed.value;
+        if (parsed.error && Array.isArray(req.body?.serialNumbers)) {
+            const seen = new Set();
+            for (const sn of req.body.serialNumbers) {
+                const value = typeof sn === "string" ? sn.trim() : "";
+                if (value && value.length <= 100 && !seen.has(value.toLowerCase())) {
+                    seen.add(value.toLowerCase());
+                    unique.push(value);
+                }
+            }
+        }
+        const existing = await findExistingSerials(unique.slice(0, MAX_SERIALS));
+        return sendSuccess(res, "Serial number check...", { existing }, 200);
     } catch (error) {
         return sendError(res, error.message, null, 500);
     }

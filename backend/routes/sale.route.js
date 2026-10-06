@@ -8,6 +8,7 @@ const { authenticate, loadBranchScope } = require('@/middleware/auth.middleware'
 router.use(authenticate, loadBranchScope)
 
 router.get('/products', saleController.saleProducts)
+router.get('/summary', saleController.salesSummary)
 router.get('/', saleController.sale)
 router.post('/', saleController.createSale)
 router.put('/:id', saleController.updateSale)

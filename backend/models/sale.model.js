@@ -32,6 +32,24 @@ const Sale = sequelize.define(
             type: DataTypes.STRING(20),
             allowNull: false,
         },
+        // Serial numbers of the units sold (JSON array); empty for products without serial numbers
+        serialNumbers: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+            get() {
+                const raw = this.getDataValue("serialNumbers");
+                if (!raw) return [];
+                try {
+                    const list = JSON.parse(raw);
+                    return Array.isArray(list) ? list : [];
+                } catch {
+                    return [];
+                }
+            },
+            set(list) {
+                this.setDataValue("serialNumbers", Array.isArray(list) && list.length > 0 ? JSON.stringify(list) : null);
+            },
+        },
         quantity: {
             type: DataTypes.INTEGER.UNSIGNED,
             allowNull: false,

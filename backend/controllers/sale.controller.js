@@ -1,7 +1,7 @@
 const { Op } = require("sequelize");
 const sequelize = require("@/config/db");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Sale, Product, ProductStock, Branch } = require("@/models/index");
+const { Sale, Product, ProductStock, ProductSerial, Branch } = require("@/models/index");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
@@ -10,6 +10,10 @@ const { Sale, Product, ProductStock, Branch } = require("@/models/index");
 // puts the old quantity back and takes the new one out; deleting it puts the quantity back.
 // All of that happens in one transaction with the stock rows locked, so stock never goes
 // negative and another branch's stock is never touched.
+//
+// Serial numbers: for a serial-tracked product the sale names the exact units sold. Those
+// product_serial rows are removed from the branch's stock and their numbers saved on the sale;
+// editing or deleting the sale puts them back. The quantity always equals the number of serials.
 
 const MAX_QUANTITY = 1000000000;
 const MAX_AMOUNT = 1000000000;
@@ -103,9 +107,20 @@ const validateBranchForSale = async (branchId, scope) => {
     return null;
 };
 
+// Optional list of serial numbers; trimmed, blanks dropped, no repeats (case-insensitive)
+const parseSerialNumbers = (list) => {
+    if (list === undefined || list === null) return { value: [] };
+    if (!Array.isArray(list) || list.some((x) => typeof x !== "string")) return { error: "Invalid serial numbers" };
+    const serials = list.map((x) => x.trim()).filter(Boolean);
+    const lower = serials.map((x) => x.toLowerCase());
+    const repeated = serials.find((_, i) => lower.indexOf(lower[i]) !== i);
+    if (repeated) return { error: `Serial number ${repeated} is selected more than once` };
+    return { value: serials };
+};
+
 // Shared body validation for create and update. Returns { error, status } or { values }.
 const parseSaleBody = (scope, body) => {
-    const { customerName, customerPhone, productId, quantity, sellingAmount, saleDate, branchId } = body || {};
+    const { customerName, customerPhone, productId, quantity, sellingAmount, saleDate, branchId, serialNumbers } = body || {};
 
     const name = parseText(customerName, "Customer name", 255);
     if (name.error) return { error: name.error };
@@ -119,6 +134,9 @@ const parseSaleBody = (scope, body) => {
 
     const parsedQuantity = parseQuantity(quantity);
     if (parsedQuantity.error) return { error: parsedQuantity.error };
+
+    const serials = parseSerialNumbers(serialNumbers);
+    if (serials.error) return { error: serials.error };
 
     const amount = parseAmount(sellingAmount);
     if (amount.error) return { error: amount.error };
@@ -135,6 +153,7 @@ const parseSaleBody = (scope, body) => {
             customerPhone: phone,
             productId: parsedProductId,
             quantity: parsedQuantity.value,
+            serialNumbers: serials.value,
             sellingAmount: amount.value,
             saleDate: date.value,
             branchId: resolved.branchId,
@@ -166,6 +185,47 @@ const returnStock = async ({ productId, branchId, quantity, transaction }) => {
     if (stock) await stock.update({ quantity: Math.min(stock.quantity + quantity, MAX_QUANTITY) }, { transaction });
 };
 
+// Checks the sale's serial numbers against the product: tracked products need exactly one
+// serial number per unit, others none.
+const checkSerialsForProduct = (product, { serialNumbers, quantity }) => {
+    if (!product.hasSerialNumber) {
+        if (serialNumbers.length > 0) throw new SaleError(`${product.name} doesn't use serial numbers`);
+        return;
+    }
+    if (serialNumbers.length === 0) throw new SaleError("Select the serial number of each unit sold");
+    if (serialNumbers.length !== quantity) throw new SaleError("Quantity must match the number of serial numbers selected");
+};
+
+// Removes the sold units from the branch's stock and returns their stored serial numbers.
+// Each one must be in stock for this product in this branch.
+const takeSerials = async ({ productId, branchId, serialNumbers, transaction }) => {
+    if (serialNumbers.length === 0) return [];
+    const rows = await ProductSerial.findAll({
+        where: { productId, branchId, serialNumber: serialNumbers },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+    });
+    if (rows.length !== serialNumbers.length) {
+        const found = new Set(rows.map((r) => r.serialNumber.toLowerCase()));
+        const missing = serialNumbers.filter((x) => !found.has(x.toLowerCase()));
+        throw new SaleError(`Not in stock in this branch: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ` and ${missing.length - 5} more` : ""}`);
+    }
+    await ProductSerial.destroy({ where: { id: rows.map((r) => r.id) }, transaction });
+    return rows.map((r) => r.serialNumber);
+};
+
+// Puts a sale's units back into stock. Skipped, like returnStock, when the product is no longer
+// stocked in that branch; a serial number already back in stock elsewhere is left alone.
+const returnSerials = async ({ productId, branchId, serialNumbers, transaction }) => {
+    if (!productId || serialNumbers.length === 0) return;
+    const stock = await ProductStock.findOne({ where: { productId, branchId }, transaction });
+    if (!stock) return;
+    await ProductSerial.bulkCreate(
+        serialNumbers.map((serialNumber) => ({ productId, branchId, serialNumber })),
+        { transaction, ignoreDuplicates: true },
+    );
+};
+
 // A branch member only ever finds sales of their own branch; anything else looks missing
 const findScopedSale = (id, scope, options = {}) =>
     Sale.findOne({ where: scope.isAdmin ? { id } : { id, branchId: scope.branchId }, ...options });
@@ -177,6 +237,7 @@ const toSaleResponse = (sale) => ({
     productId: sale.productId,
     // Follows a product rename; falls back to the name at sale time once the product is gone
     productName: sale.Product?.name ?? sale.productName,
+    serialNumbers: sale.serialNumbers,
     quantity: sale.quantity,
     sellingAmount: Number(sale.sellingAmount),
     saleDate: sale.saleDate,
@@ -201,18 +262,75 @@ exports.saleProducts = async (req, res) => {
         const stocks = await ProductStock.findAll({
             where: { branchId: resolved.branchId },
             attributes: ["productId", "quantity"],
-            include: [{ model: Product, attributes: ["id", "name"], required: true }],
+            include: [{ model: Product, attributes: ["id", "name", "hasSerialNumber"], required: true }],
             order: [[Product, "name", "ASC"]],
         });
 
+        // In-stock serial numbers of this branch, for picking the exact units sold
+        const serials = await ProductSerial.findAll({
+            where: { branchId: resolved.branchId },
+            attributes: ["productId", "serialNumber"],
+            order: [["serialNumber", "ASC"]],
+            raw: true,
+        });
+        const serialsByProduct = new Map();
+        for (const row of serials) {
+            if (!serialsByProduct.has(row.productId)) serialsByProduct.set(row.productId, []);
+            serialsByProduct.get(row.productId).push(row.serialNumber);
+        }
+
         const data = {
             branchId: resolved.branchId,
-            product: stocks.map((s) => ({ id: s.productId, name: s.Product.name, quantity: s.quantity })),
+            product: stocks.map((s) => ({
+                id: s.productId,
+                name: s.Product.name,
+                hasSerialNumber: s.Product.hasSerialNumber,
+                serialNumbers: serialsByProduct.get(s.productId) ?? [],
+                quantity: s.quantity,
+            })),
         };
         return sendSuccess(res, "Sale products...", data, 200);
     } catch (error) {
         return sendError(res, error.message, null, 500);
     }
+};
+
+// Filters shared by the sales list and its totals: branch scope, search text and an inclusive
+// sale date range. Search also matches the current product name and the sold serial numbers,
+// so callers must include Product.
+// Returns { error } or { where }.
+const buildSaleWhere = (scope, query) => {
+    // Branch members only ever get their own branch's sales
+    const where = {};
+    if (!scope.isAdmin) where.branchId = scope.branchId;
+
+    const search = query.search?.trim();
+    if (search) {
+        const like = { [Op.like]: `%${search}%` };
+        // Phone numbers are stored without spaces or dashes, so match the typed digits that way
+        const phoneSearch = search.replace(/[\s()-]/g, "");
+        where[Op.or] = [
+            { customerName: like },
+            { productName: like },
+            { "$Product.name$": like },
+            { serialNumbers: like },
+            ...(phoneSearch ? [{ customerPhone: { [Op.like]: `%${phoneSearch}%` } }] : []),
+        ];
+    }
+
+    // Inclusive range on the sale date
+    const startDate = query.startDate ? parseDate(query.startDate) : null;
+    const endDate = query.endDate ? parseDate(query.endDate) : null;
+    if (query.startDate && !startDate) return { error: "Invalid start date" };
+    if (query.endDate && !endDate) return { error: "Invalid end date" };
+    if (startDate && endDate && startDate > endDate) return { error: "Start date must be on or before end date" };
+    if (startDate || endDate) {
+        where.saleDate = {};
+        if (startDate) where.saleDate[Op.gte] = query.startDate;
+        if (endDate) where.saleDate[Op.lte] = query.endDate;
+    }
+
+    return { where };
 };
 
 exports.sale = async (req, res) => {
@@ -222,36 +340,9 @@ exports.sale = async (req, res) => {
         const pageSize = Math.max(parseInt(req.query.pageSize, 10) || 10, 1);
         const offset = (page - 1) * pageSize;
 
-        // Branch members only ever get their own branch's sales
-        const where = {};
-        if (!scope.isAdmin) where.branchId = scope.branchId;
-
-        const search = req.query.search?.trim();
-        if (search) {
-            const like = { [Op.like]: `%${search}%` };
-            // Phone numbers are stored without spaces or dashes, so match the typed digits that way
-            const phoneSearch = search.replace(/[\s()-]/g, "");
-            where[Op.or] = [
-                { customerName: like },
-                { productName: like },
-                { "$Product.name$": like },
-                ...(phoneSearch ? [{ customerPhone: { [Op.like]: `%${phoneSearch}%` } }] : []),
-            ];
-        }
-
-        // Inclusive range on the sale date
-        const startDate = req.query.startDate ? parseDate(req.query.startDate) : null;
-        const endDate = req.query.endDate ? parseDate(req.query.endDate) : null;
-        if (req.query.startDate && !startDate) return sendError(res, "Invalid start date", null, 400);
-        if (req.query.endDate && !endDate) return sendError(res, "Invalid end date", null, 400);
-        if (startDate && endDate && startDate > endDate) {
-            return sendError(res, "Start date must be on or before end date", null, 400);
-        }
-        if (startDate || endDate) {
-            where.saleDate = {};
-            if (startDate) where.saleDate[Op.gte] = req.query.startDate;
-            if (endDate) where.saleDate[Op.lte] = req.query.endDate;
-        }
+        const filter = buildSaleWhere(scope, req.query);
+        if (filter.error) return sendError(res, filter.error, null, 400);
+        const { where } = filter;
 
         const { count, rows } = await Sale.findAndCountAll({
             where,
@@ -281,6 +372,41 @@ exports.sale = async (req, res) => {
     }
 };
 
+// Total selling amount per branch for the same search and date filters as the list (no dates
+// means all time). Branch members only get their own branch; admins get every branch,
+// including ones with nothing matching.
+exports.salesSummary = async (req, res) => {
+    try {
+        const scope = req.branchScope;
+        const filter = buildSaleWhere(scope, req.query);
+        if (filter.error) return sendError(res, filter.error, null, 400);
+
+        const [rows, branches] = await Promise.all([
+            Sale.findAll({
+                where: filter.where,
+                include: [{ model: Product, attributes: [], required: false }],
+                attributes: ["branchId", [sequelize.fn("SUM", sequelize.col("Sale.sellingAmount")), "total"]],
+                group: ["Sale.branchId"],
+                raw: true,
+            }),
+            Branch.findAll({
+                where: scope.isAdmin ? {} : { id: scope.branchId },
+                attributes: ["id", "name"],
+                order: [["name", "ASC"]],
+                raw: true,
+            }),
+        ]);
+
+        const totals = new Map(rows.map((r) => [r.branchId, Number(r.total) || 0]));
+        const branch = branches.map((br) => ({ branchId: br.id, branchName: br.name, total: totals.get(br.id) ?? 0 }));
+
+        const data = { branch, total: branch.reduce((sum, br) => sum + br.total, 0) };
+        return sendSuccess(res, "Sales summary...", data, 200);
+    } catch (error) {
+        return sendError(res, error.message, null, 500);
+    }
+};
+
 exports.createSale = async (req, res) => {
     try {
         const scope = req.branchScope;
@@ -294,11 +420,13 @@ exports.createSale = async (req, res) => {
         const sale = await sequelize.transaction(async (transaction) => {
             const product = await Product.findByPk(values.productId, { transaction });
             if (!product) throw new SaleError("Selected product does not exist");
+            checkSerialsForProduct(product, values);
 
             await takeStock({ ...values, transaction });
+            const serialNumbers = await takeSerials({ ...values, transaction });
 
             return Sale.create(
-                { ...values, productName: product.name, createdBy: req.employee.id },
+                { ...values, serialNumbers, productName: product.name, createdBy: req.employee.id },
                 { transaction },
             );
         });
@@ -336,6 +464,10 @@ exports.updateSale = async (req, res) => {
 
             const product = await Product.findByPk(values.productId, { transaction });
             if (!product) throw new SaleError("Selected product does not exist");
+            checkSerialsForProduct(product, values);
+
+            // Units go back first, so the sale can keep some or all of its serial numbers
+            await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
 
             const sameStock = sale.productId === values.productId && sale.branchId === values.branchId;
             if (sameStock) {
@@ -351,7 +483,8 @@ exports.updateSale = async (req, res) => {
                 await takeStock({ ...values, transaction });
             }
 
-            await sale.update({ ...values, productName: product.name }, { transaction });
+            const serialNumbers = await takeSerials({ ...values, transaction });
+            await sale.update({ ...values, serialNumbers, productName: product.name }, { transaction });
         });
 
         return sendSuccess(res, "Sale updated successfully", { id }, 200);
@@ -360,7 +493,7 @@ exports.updateSale = async (req, res) => {
     }
 };
 
-// Hard delete; the sold quantity goes back into the sale branch's stock
+// Hard delete; the sold quantity (and serial numbers) go back into the sale branch's stock
 exports.deleteSale = async (req, res) => {
     try {
         const scope = req.branchScope;
@@ -372,6 +505,7 @@ exports.deleteSale = async (req, res) => {
             if (!sale) throw new SaleError(NOT_FOUND, 404);
 
             await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
+            await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
             await sale.destroy({ transaction });
         });
 

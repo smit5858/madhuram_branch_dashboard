@@ -41,14 +41,27 @@ export const employeeSchema = (isEdit: boolean) => Yup.object({
 
 export const MAX_PRODUCT_QUANTITY = 1000000000;
 
+/** Serial numbers typed one per line (commas also separate them), trimmed, blanks dropped */
+export const splitSerialNumbers = (text?: string) =>
+	(text ?? "").split(/[\n,]+/).map((sn) => sn.trim()).filter(Boolean);
+
 export const productSchema = Yup.object({
 	name: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Product name is required"),
-	quantity: Yup.number()
-		.typeError("Quantity must be a number")
-		.integer("Quantity must be a whole number")
-		.min(0, "Quantity cannot be negative")
-		.max(MAX_PRODUCT_QUANTITY, "Quantity is too large")
-		.required("Quantity is required"),
+	hasSerialNumber: Yup.boolean(),
+	// Serial-tracked products take serial numbers instead of a quantity
+	quantity: Yup.mixed().when("hasSerialNumber", ([hasSerialNumber]: boolean[]) => hasSerialNumber
+		? Yup.mixed().notRequired()
+		: Yup.number()
+			.typeError("Quantity must be a number")
+			.integer("Quantity must be a whole number")
+			.min(0, "Quantity cannot be negative")
+			.max(MAX_PRODUCT_QUANTITY, "Quantity is too large")
+			.required("Quantity is required")),
+	serialNumbers: Yup.string().when("hasSerialNumber", ([hasSerialNumber]: boolean[], schema: Yup.StringSchema) => hasSerialNumber
+		? schema
+			// Repeats and serial numbers that already exist are checked by the form field itself
+			.test("serial-length", "Each serial number must be at most 100 characters", (value) => splitSerialNumbers(value).every((sn) => sn.length <= 100))
+		: schema),
 	branchId: Yup.string().required("Branch is required"),
 });
 

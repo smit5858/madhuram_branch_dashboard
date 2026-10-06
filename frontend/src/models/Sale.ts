@@ -1,7 +1,7 @@
 export interface ISaleRequestModel {
     page: number;
     pageSize: number;
-    /** Matches customer name, customer phone or product name */
+    /** Matches customer name, customer phone, product name or a sold serial number */
     search?: string;
     /** yyyy-MM-dd, inclusive range on the sale date */
     startDate?: string;
@@ -16,6 +16,8 @@ export interface ISaleModel {
     /** null once the product has been removed from the catalogue */
     productId: number | null;
     productName: string;
+    /** Serial numbers of the units sold; empty for products without serial numbers */
+    serialNumbers: string[];
     quantity: number;
     sellingAmount: number;
     /** yyyy-MM-dd */
@@ -31,6 +33,8 @@ export interface ISaleCreateModel {
     customerPhone: string;
     productId: number;
     quantity: number;
+    /** Required for serial-tracked products, one per unit */
+    serialNumbers?: string[];
     sellingAmount: number;
     saleDate: string;
     /** Ignored for branch members: the API always uses their own branch */
@@ -43,6 +47,7 @@ export interface ISaleFormValues {
     customerPhone: string;
     productId: string;
     quantity: number | "";
+    serialNumbers: string[];
     sellingAmount: number | "";
     saleDate: string;
     branchId: string;
@@ -52,12 +57,22 @@ export interface ISaleFormValues {
 export interface ISaleProductModel {
     id: number;
     name: string;
+    hasSerialNumber: boolean;
+    /** In-stock serial numbers in this branch */
+    serialNumbers: string[];
     quantity: number;
 }
 
 export interface ISaleProductResponseModel {
     branchId: number;
     product: ISaleProductModel[];
+}
+
+/** Totals for the same search and date filters as the sales list */
+export interface ISaleSummaryModel {
+    /** Branch members get only their own branch; admins get every branch */
+    branch: { branchId: number; branchName: string; total: number }[];
+    total: number;
 }
 
 export interface ISaleResponseModel {

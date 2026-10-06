@@ -49,7 +49,8 @@ const ProductFilterWatcher = ({ onChange }: { onChange: (filters: ProductFilterV
     return null;
 };
 
-const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilterValues) => void; onAdd: () => void }) => {
+// onAdd is only passed for admins, who are the only ones allowed to add products
+const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilterValues) => void; onAdd?: () => void }) => {
     const today = useMemo(() => new Date(), []);
 
     return (
@@ -62,7 +63,7 @@ const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilter
                             <Field
                                 id="search"
                                 name="search"
-                                placeholder="Search product name..."
+                                placeholder="Search name or serial number..."
                                 component={Input}
                             />
                         </div>
@@ -92,10 +93,12 @@ const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilter
                             Reset
                         </Button>
                     </Form>
-                    <Button className="lg:w-auto" onClick={onAdd}>
-                        <Plus className="size-4" />
-                        Add Product
-                    </Button>
+                    {onAdd && (
+                        <Button className="lg:w-auto" onClick={onAdd}>
+                            <Plus className="size-4" />
+                            Add Product
+                        </Button>
+                    )}
                 </div>
             )}
         </Formik>
@@ -104,12 +107,50 @@ const ProductFilters = ({ onChange, onAdd }: { onChange: (filters: ProductFilter
 
 const formatDate = (value: string | null | undefined) => DateToDateStringWithMonth(value);
 
+const SERIALS_SHOWN = 3;
+
+// A few of the product's in-stock serial numbers, the ones matching the search first
+const SerialNumbersCell = ({ product, search }: { product: IProductModel; search: string }) => {
+    if (!product.hasSerialNumber) return <span className="text-slate-300">—</span>;
+
+    const all = product.stocks.flatMap((s) => s.serialNumbers);
+    if (all.length === 0) return <span className="text-xs text-slate-400">None in stock</span>;
+
+    const term = search.toLowerCase();
+    const matches = term ? all.filter((sn) => sn.toLowerCase().includes(term)) : [];
+    const ordered = [...matches, ...all.filter((sn) => !matches.includes(sn))];
+    const shown = ordered.slice(0, SERIALS_SHOWN);
+
+    return (
+        <div className="flex flex-wrap items-center gap-1" title={all.join(", ")}>
+            {shown.map((sn) => (
+                <span
+                    key={sn}
+                    className={matches.includes(sn)
+                        ? "rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
+                        : "rounded-md bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600"}
+                >
+                    {sn}
+                </span>
+            ))}
+            {all.length > SERIALS_SHOWN && <span className="text-xs text-slate-400">+{all.length - SERIALS_SHOWN} more</span>}
+        </div>
+    );
+};
+
 // One quantity column per visible branch: every branch for admins, only their own for members
-const buildColumns = (scope: IProductBranchScopeModel): TableColumn<IProductModel>[] => [
+const buildColumns = (scope: IProductBranchScopeModel, search: string): TableColumn<IProductModel>[] => [
     // Running number (1, 2, 3 ... continuing across pages), not the database id
     { id: "srNo", label: "Sr no.", width: 80, renderCell: (_value, _row, _column, _rowIndex, serialNo) => serialNo },
     // Capped so the spare width goes to the branch columns instead of a long empty Name column
     { id: "name", label: "Name", sortable: true, width: "30%", className: "min-w-48" },
+    {
+        id: "serialNumbers",
+        label: "Serial Numbers",
+        className: "min-w-40",
+        accessor: (row) => row.hasSerialNumber,
+        renderCell: (_value, row) => <SerialNumbersCell product={row} search={search} />,
+    },
     ...scope.branch.map<TableColumn<IProductModel>>((branch) => ({
         id: `branch-${branch.id}`,
         label: branch.isActive ? branch.name : `${branch.name} (Inactive)`,
@@ -121,7 +162,7 @@ const buildColumns = (scope: IProductBranchScopeModel): TableColumn<IProductMode
             const stock = row.stocks.find((s) => s.branchId === branch.id);
             return (
                 <span
-                    title={`${branch.name} · updated ${formatDate(stock?.updatedAt)}`}
+                    title={`${branch.name} · updated ${formatDate(stock?.updatedAt)}${stock?.serialNumbers.length ? `\nSerial numbers: ${stock.serialNumbers.join(", ")}` : ""}`}
                     className={quantity === 0 ? "font-medium tabular-nums text-red-500" : "font-medium tabular-nums text-slate-800"}
                 >
                     {quantity.toLocaleString("en-IN")}
@@ -157,7 +198,7 @@ const Products = () => {
         retry: false,
     });
 
-    const columns = useMemo(() => (scope ? buildColumns(scope) : []), [scope]);
+    const columns = useMemo(() => (scope ? buildColumns(scope, filters.search) : []), [scope, filters.search]);
     const ownBranchName = scope && !scope.isAdmin ? scope.branch[0]?.name : null;
 
     if (isScopeLoading) {
@@ -190,7 +231,7 @@ const Products = () => {
 
     return (
         <div className="p-6 bg-white rounded-xl shadow-md flex flex-col gap-6">
-            <ProductFilters onChange={setFilters} onAdd={() => setForm({ open: true, product: null })} />
+            <ProductFilters onChange={setFilters} onAdd={scope.isAdmin ? () => setForm({ open: true, product: null }) : undefined} />
 
             <p className="-mt-3 text-xs text-slate-500">
                 {scope.isAdmin
