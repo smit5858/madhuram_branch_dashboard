@@ -120,7 +120,7 @@ const parseSerialNumbers = (list) => {
 
 // Shared body validation for create and update. Returns { error, status } or { values }.
 const parseSaleBody = (scope, body) => {
-    const { customerName, customerPhone, productId, quantity, sellingAmount, saleDate, branchId, serialNumbers } = body || {};
+    const { customerName, customerPhone, productId, productName, quantity, sellingAmount, saleDate, branchId, serialNumbers } = body || {};
 
     const name = parseText(customerName, "Customer name", 255);
     if (name.error) return { error: name.error };
@@ -129,14 +129,23 @@ const parseSaleBody = (scope, body) => {
     if (!phone) return { error: "Customer phone number is required" };
     if (!PHONE_REGEX.test(phone)) return { error: "Enter a valid phone number" };
 
-    const parsedProductId = parseId(productId);
-    if (!parsedProductId) return { error: productId ? "Invalid product" : "Product is required" };
+    // No productId means "Other": a product outside the catalogue, named by the user, with no stock
+    const isOther = productId === undefined || productId === null || productId === "";
+    const parsedProductId = isOther ? null : parseId(productId);
+    if (!isOther && !parsedProductId) return { error: "Invalid product" };
+    let otherName = null;
+    if (isOther) {
+        const parsedName = parseText(productName, "Product name", 255);
+        if (parsedName.error) return { error: parsedName.error };
+        otherName = parsedName.value;
+    }
 
     const parsedQuantity = parseQuantity(quantity);
     if (parsedQuantity.error) return { error: parsedQuantity.error };
 
     const serials = parseSerialNumbers(serialNumbers);
     if (serials.error) return { error: serials.error };
+    if (isOther && serials.value.length > 0) return { error: "Other products don't use serial numbers" };
 
     const amount = parseAmount(sellingAmount);
     if (amount.error) return { error: amount.error };
@@ -152,6 +161,7 @@ const parseSaleBody = (scope, body) => {
             customerName: name.value,
             customerPhone: phone,
             productId: parsedProductId,
+            productName: otherName,
             quantity: parsedQuantity.value,
             serialNumbers: serials.value,
             sellingAmount: amount.value,
@@ -418,6 +428,11 @@ exports.createSale = async (req, res) => {
         if (branchError) return sendError(res, branchError, null, 400);
 
         const sale = await sequelize.transaction(async (transaction) => {
+            // "Other" products aren't in the catalogue, so no stock or serial numbers move
+            if (!values.productId) {
+                return Sale.create({ ...values, createdBy: req.employee.id }, { transaction });
+            }
+
             const product = await Product.findByPk(values.productId, { transaction });
             if (!product) throw new SaleError("Selected product does not exist");
             checkSerialsForProduct(product, values);
@@ -462,12 +477,20 @@ exports.updateSale = async (req, res) => {
             const sale = await findScopedSale(id, scope, { transaction, lock: transaction.LOCK.UPDATE });
             if (!sale) throw new SaleError(NOT_FOUND, 404);
 
-            const product = await Product.findByPk(values.productId, { transaction });
-            if (!product) throw new SaleError("Selected product does not exist");
-            checkSerialsForProduct(product, values);
+            // No product means "Other", which has no stock to take
+            const product = values.productId ? await Product.findByPk(values.productId, { transaction }) : null;
+            if (values.productId && !product) throw new SaleError("Selected product does not exist");
+            if (product) checkSerialsForProduct(product, values);
 
             // Units go back first, so the sale can keep some or all of its serial numbers
             await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
+
+            if (!product) {
+                // Changed to "Other": everything the sale held goes back to stock
+                await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
+                await sale.update({ ...values, serialNumbers: [] }, { transaction });
+                return;
+            }
 
             const sameStock = sale.productId === values.productId && sale.branchId === values.branchId;
             if (sameStock) {

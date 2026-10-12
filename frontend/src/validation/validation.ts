@@ -1,6 +1,7 @@
 import * as Yup from "yup";
 import { isValidPhoneNumber } from "libphonenumber-js";
 import { isValid, parse } from "date-fns";
+import { OTHER_PRODUCT } from "@/models/Sale";
 
 export const validateschema = Yup.object({
 	name: Yup.string().required("Name is required"),
@@ -74,6 +75,10 @@ export const saleSchema = Yup.object({
 		.required("Customer phone number is required")
 		.test("valid-phone", "Enter a valid phone number", (value) => !value || isValidPhoneNumber(value)),
 	productId: Yup.string().required("Product is required"),
+	productName: Yup.string().when("productId", {
+		is: OTHER_PRODUCT,
+		then: (schema) => schema.trim().max(255, "Product name must be at most 255 characters").required("Product name is required"),
+	}),
 	quantity: Yup.number()
 		.typeError("Quantity must be a number")
 		.integer("Quantity must be a whole number")

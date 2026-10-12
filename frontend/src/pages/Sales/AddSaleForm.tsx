@@ -14,7 +14,7 @@ import saleService from "@/services/sale-service";
 import { saleSchema } from "@/validation/validation";
 import type { RootState } from "@/store/store";
 import type { IProductBranchScopeModel } from "@/models/Product";
-import type { ISaleFormValues, ISaleModel } from "@/models/Sale";
+import { OTHER_PRODUCT, type ISaleFormValues, type ISaleModel } from "@/models/Sale";
 
 interface AddSaleFormProps {
     open: boolean;
@@ -53,9 +53,10 @@ const BranchProductSync = ({ sale }: { sale?: ISaleModel | null }) => {
     useEffect(() => {
         if (values.branchId === previousBranch.current) return;
         previousBranch.current = values.branchId;
+        if (values.productId === OTHER_PRODUCT) return;
         const original = sale && String(sale.branchId) === values.branchId && sale.productId ? String(sale.productId) : "";
         setFieldValue("productId", original, false);
-    }, [values.branchId, sale, setFieldValue]);
+    }, [values.branchId, values.productId, sale, setFieldValue]);
 
     return null;
 };
@@ -146,19 +147,23 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
     const availableOf = (productId: number, stock: number) =>
         stock + (sale && sale.productId === productId && String(sale.branchId) === values.branchId ? sale.quantity : 0);
 
-    const productOptions = useMemo<SelectOption[]>(() => products.map((p) => {
-        const available = availableOf(p.id, p.quantity);
-        return {
-            value: String(p.id),
-            label: available > 0 ? `${p.name} (${available.toLocaleString("en-IN")} in stock)` : `${p.name} (Out of stock)`,
-            disabled: available <= 0,
-        };
+    const productOptions = useMemo<SelectOption[]>(() => [
+        ...products.map((p) => {
+            const available = availableOf(p.id, p.quantity);
+            return {
+                value: String(p.id),
+                label: available > 0 ? `${p.name} (${available.toLocaleString("en-IN")} in stock)` : `${p.name} (Out of stock)`,
+                disabled: available <= 0,
+            };
+        }),
+        { value: OTHER_PRODUCT, label: "Other" },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }), [products, sale, values.branchId]);
+    ], [products, sale, values.branchId]);
 
+    const isOther = values.productId === OTHER_PRODUCT;
     const selected = products.find((p) => String(p.id) === values.productId);
     const available = selected ? availableOf(selected.id, selected.quantity) : undefined;
-    const originalMissing = !!sale && String(sale.branchId) === values.branchId
+    const originalMissing = !!sale?.productId && String(sale.branchId) === values.branchId
         && !products.some((p) => p.id === sale.productId);
 
     // Units of the selected product that can be sold; while editing, this sale's own units count too
@@ -175,7 +180,7 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
 
     const productPlaceholder = !values.branchId
         ? "Select a branch first"
-        : isFetching ? "Loading products..." : products.length === 0 ? "No products in this branch" : "Select product";
+        : isFetching ? "Loading products..." : "Select product";
 
     return (
         <>
@@ -186,16 +191,28 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
                     label="Product"
                     options={productOptions}
                     placeholder={productPlaceholder}
-                    disabled={!values.branchId || isFetching || products.length === 0}
+                    disabled={!values.branchId || isFetching}
                     component={Select}
                 />
                 {isError && <p className="px-1 text-xs text-red-500">Could not load products for this branch.</p>}
+                {!isError && !isFetching && values.branchId && products.length === 0 && (
+                    <p className="px-1 text-xs text-slate-500">No products in this branch. Choose Other to record a sale anyway.</p>
+                )}
                 {originalMissing && !values.productId && !isFetching && (
                     <p className="px-1 text-xs text-slate-500">
                         This sale was for <span className="font-semibold text-slate-700">{sale?.productName}</span>, which is no longer stocked in this branch. Select a product to save changes.
                     </p>
                 )}
             </div>
+            {isOther && (
+                <Field
+                    id="productName"
+                    name="productName"
+                    label="Product Name"
+                    placeholder="Enter product name"
+                    component={Input}
+                />
+            )}
             {selected?.hasSerialNumber && <SerialNumberPicker options={serialOptions} />}
             <div className="grid gap-4 sm:grid-cols-2">
                 {/* Serial-tracked products take their quantity from the serial numbers ticked above */}
@@ -246,7 +263,8 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
     const initialValues = useMemo<ISaleFormValues>(() => ({
         customerName: sale?.customerName ?? "",
         customerPhone: sale?.customerPhone ?? "",
-        productId: sale?.productId ? String(sale.productId) : "",
+        productId: !sale ? "" : sale.productId ? String(sale.productId) : OTHER_PRODUCT,
+        productName: sale && !sale.productId ? sale.productName : "",
         quantity: sale?.quantity ?? 1,
         serialNumbers: sale?.serialNumbers ?? [],
         sellingAmount: sale?.sellingAmount ?? "",
@@ -260,7 +278,9 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
             const body = {
                 customerName: values.customerName.trim(),
                 customerPhone: values.customerPhone,
-                productId: Number(values.productId),
+                ...(values.productId === OTHER_PRODUCT
+                    ? { productId: null, productName: values.productName.trim() }
+                    : { productId: Number(values.productId) }),
                 quantity: Number(values.quantity),
                 // Empty for products without serial numbers (ProductSerialSync clears it on product change)
                 serialNumbers: values.serialNumbers,

@@ -31,7 +31,10 @@ export interface ISaleModel {
 export interface ISaleCreateModel {
     customerName: string;
     customerPhone: string;
-    productId: number;
+    /** null for "Other": a product outside the catalogue, named by productName, with no stock */
+    productId: number | null;
+    /** Required when productId is null; ignored otherwise */
+    productName?: string;
     quantity: number;
     /** Required for serial-tracked products, one per unit */
     serialNumbers?: string[];
@@ -41,11 +44,17 @@ export interface ISaleCreateModel {
     branchId?: number;
 }
 
+/** Product picker value for "Other": a product outside the catalogue, typed by the user */
+export const OTHER_PRODUCT = "other";
+
 /** Form state; Select works with string values and an empty number input is "" */
 export interface ISaleFormValues {
     customerName: string;
     customerPhone: string;
+    /** A product id, or OTHER_PRODUCT for a product outside the catalogue */
     productId: string;
+    /** Typed product name, used only for OTHER_PRODUCT */
+    productName: string;
     quantity: number | "";
     serialNumbers: string[];
     sellingAmount: number | "";
