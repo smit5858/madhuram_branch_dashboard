@@ -20,6 +20,7 @@ import { useDebounce } from "@/hook/useDebounce";
 import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
 import { DateToDateStringWithMonth } from "@/util/DateFormate";
+import { formatPhone } from "@/util/CommonFunction";
 import AddSaleForm from "./AddSaleForm";
 import SalesSummary from "./SalesSummary";
 
@@ -70,7 +71,7 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
                             <Field
                                 id="search"
                                 name="search"
-                                placeholder="Search customer, phone, product or serial no..."
+                                placeholder="Search customer, phone, company, product or serial no..."
                                 component={Input}
                             />
                         </div>
@@ -114,8 +115,19 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
 const buildColumns = (isAdmin: boolean): TableColumn<ISaleModel>[] => [
     // Running number (1, 2, 3 ... continuing across pages), not the database id
     { id: "srNo", label: "Sr no.", width: 80, renderCell: (_value, _row, _column, _rowIndex, serialNo) => serialNo },
-    { id: "customerName", label: "Customer Name", sortable: true, className: "min-w-48" },
-    { id: "customerPhone", label: "Phone", visible: false },
+    {
+        id: "customerName",
+        label: "Customer Name",
+        sortable: true,
+        className: "min-w-48",
+        renderCell: (name: string, row) => (
+            <div className="flex flex-col gap-0.5">
+                <span>{name}</span>
+                {row.customer?.companyName && <span className="text-xs text-slate-500">{row.customer.companyName}</span>}
+            </div>
+        ),
+    },
+    { id: "customerPhone", label: "Phone", visible: false, renderCell: (phone: string) => formatPhone(phone) },
     {
         id: "productName",
         label: "Product",

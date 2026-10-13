@@ -1,7 +1,8 @@
-const { Op } = require("sequelize");
+const { Op, UniqueConstraintError } = require("sequelize");
 const sequelize = require("@/config/db");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Sale, Product, ProductStock, ProductSerial, Branch } = require("@/models/index");
+const { Sale, Product, ProductStock, ProductSerial, Branch, Customer } = require("@/models/index");
+const { parseCustomerFields, comparableName, duplicateMessage, toCustomerResponse } = require("@/helper/customer");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
@@ -14,22 +15,29 @@ const { Sale, Product, ProductStock, ProductSerial, Branch } = require("@/models
 // Serial numbers: for a serial-tracked product the sale names the exact units sold. Those
 // product_serial rows are removed from the branch's stock and their numbers saved on the sale;
 // editing or deleting the sale puts them back. The quantity always equals the number of serials.
+//
+// Customers: every saved sale is linked to a customer record (see resolveSaleCustomer). The
+// customer is found or created inside the sale's transaction, so a sale that fails never
+// leaves a new customer behind.
 
 const MAX_QUANTITY = 1000000000;
 const MAX_AMOUNT = 1000000000;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const AMOUNT_REGEX = /^\d+(\.\d{1,2})?$/;
-// E.164, as sent by the frontend PhoneInput ("+919876543210")
-const PHONE_REGEX = /^\+[1-9]\d{6,14}$/;
 const NOT_FOUND = "Sale not found";
 
 // Thrown inside a transaction so it rolls back, then turned into an API error
 class SaleError extends Error {
-    constructor(message, status = 400) {
+    constructor(message, status = 400, code = null, data = null) {
         super(message);
         this.status = status;
+        this.code = code;
+        this.data = data;
     }
 }
+
+// Another request saved the same new customer while this sale was in progress
+class CustomerRaceError extends Error {}
 
 const parseId = (value) => {
     const id = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
@@ -120,14 +128,22 @@ const parseSerialNumbers = (list) => {
 
 // Shared body validation for create and update. Returns { error, status } or { values }.
 const parseSaleBody = (scope, body) => {
-    const { customerName, customerPhone, productId, productName, quantity, sellingAmount, saleDate, branchId, serialNumbers } = body || {};
+    const { customerId, customerName, customerPhone, customerDetails, productId, productName, quantity, sellingAmount, saleDate, branchId, serialNumbers } = body || {};
 
-    const name = parseText(customerName, "Customer name", 255);
-    if (name.error) return { error: name.error };
+    // A picked existing customer, or nothing for details typed into the form
+    const hasCustomerId = customerId !== undefined && customerId !== null && customerId !== "";
+    const parsedCustomerId = hasCustomerId ? parseId(customerId) : null;
+    if (hasCustomerId && !parsedCustomerId) return { error: "Invalid customer" };
 
-    const phone = typeof customerPhone === "string" ? customerPhone.trim() : "";
-    if (!phone) return { error: "Customer phone number is required" };
-    if (!PHONE_REGEX.test(phone)) return { error: "Enter a valid phone number" };
+    // Optional { email, address, pincode, city, companyName } for a new customer
+    if (customerDetails !== undefined && customerDetails !== null && (typeof customerDetails !== "object" || Array.isArray(customerDetails))) {
+        return { error: "Invalid customer details" };
+    }
+    const customer = parseCustomerFields(
+        { ...(customerDetails || {}), name: customerName, phone: customerPhone },
+        { requirePhone: true, phoneLabel: "Customer phone number" },
+    );
+    if (customer.error) return { error: customer.error };
 
     // No productId means "Other": a product outside the catalogue, named by the user, with no stock
     const isOther = productId === undefined || productId === null || productId === "";
@@ -157,9 +173,10 @@ const parseSaleBody = (scope, body) => {
     if (resolved.error) return resolved;
 
     return {
+        customer: { id: parsedCustomerId, ...customer.values },
         values: {
-            customerName: name.value,
-            customerPhone: phone,
+            customerName: customer.values.name,
+            customerPhone: customer.values.phone,
             productId: parsedProductId,
             productName: otherName,
             quantity: parsedQuantity.value,
@@ -169,6 +186,70 @@ const parseSaleBody = (scope, body) => {
             branchId: resolved.branchId,
         },
     };
+};
+
+// The customer a sale belongs to, found or created inside the sale's transaction:
+//  - A picked customer (customer.id) is used as is; their saved details are never overwritten
+//    from the sale form. The only exception is filling in a phone number they don't have yet.
+//  - Otherwise the phone number decides: an existing customer with that number and the same
+//    name is reused, so repeat customers are never saved twice. The same number under a
+//    different name is refused, so the user picks the right customer instead of a silent merge.
+//  - No match: a new customer is created with the details typed in the form.
+const resolveSaleCustomer = async (customer, { employeeId, transaction }) => {
+    const { id, ...details } = customer;
+
+    if (id) {
+        const picked = await Customer.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+        if (!picked) throw new SaleError("The selected customer no longer exists. Search again or enter the customer's details.");
+        if (picked.phone && picked.phone !== details.phone) {
+            throw new SaleError("The phone number doesn't match the selected customer. Change the customer to use a different number.");
+        }
+        if (!picked.phone) {
+            const owner = await Customer.findOne({ where: { phone: details.phone }, transaction });
+            if (owner) {
+                throw new SaleError(duplicateMessage(owner, details), 409, "CUSTOMER_EXISTS", { customer: toCustomerResponse(owner) });
+            }
+            await picked.update({ phone: details.phone }, { transaction });
+        }
+        return picked;
+    }
+
+    const existing = await Customer.findOne({ where: { phone: details.phone }, transaction });
+    if (existing) {
+        if (comparableName(existing.name) === comparableName(details.name)) return existing;
+        throw new SaleError(
+            `${duplicateMessage(existing, details)}. Select that customer from the suggestions, or use a different phone number.`,
+            409,
+            "CUSTOMER_EXISTS",
+            { customer: toCustomerResponse(existing) },
+        );
+    }
+
+    try {
+        return await Customer.create({ ...details, createdBy: employeeId }, { transaction });
+    } catch (error) {
+        if (error instanceof UniqueConstraintError) throw new CustomerRaceError();
+        throw error;
+    }
+};
+
+// Sale fields copied from the linked customer
+const customerFields = (customer) => ({
+    customerId: customer.id,
+    customerName: customer.name,
+    customerPhone: customer.phone,
+});
+
+// Runs a sale transaction. If a concurrent request created the same new customer first, runs
+// it once more so this sale picks up that customer instead of failing or duplicating it.
+// The first attempt was fully rolled back, so nothing is applied twice.
+const saleTransaction = async (work) => {
+    try {
+        return await sequelize.transaction(work);
+    } catch (error) {
+        if (!(error instanceof CustomerRaceError)) throw error;
+        return sequelize.transaction(work);
+    }
 };
 
 const lockStock = (productId, branchId, transaction) =>
@@ -242,8 +323,11 @@ const findScopedSale = (id, scope, options = {}) =>
 
 const toSaleResponse = (sale) => ({
     id: sale.id,
-    customerName: sale.customerName,
-    customerPhone: sale.customerPhone,
+    customerId: sale.customerId,
+    // Follow edits made in the Customers module; fall back to the sale's own copy otherwise
+    customerName: sale.Customer?.name ?? sale.customerName,
+    customerPhone: sale.Customer?.phone ?? sale.customerPhone,
+    customer: sale.Customer ? toCustomerResponse(sale.Customer) : null,
     productId: sale.productId,
     // Follows a product rename; falls back to the name at sale time once the product is gone
     productName: sale.Product?.name ?? sale.productName,
@@ -258,7 +342,10 @@ const toSaleResponse = (sale) => ({
 });
 
 const sendSaleError = (res, error) => {
-    if (error instanceof SaleError) return sendError(res, error.message, null, error.status);
+    if (error instanceof SaleError) return sendError(res, error.message, error.code, error.status, error.data);
+    if (error instanceof CustomerRaceError) {
+        return sendError(res, "This customer was just saved by someone else. Please submit again.", "CUSTOMER_EXISTS", 409);
+    }
     return sendError(res, error.message, null, 500);
 };
 
@@ -306,8 +393,9 @@ exports.saleProducts = async (req, res) => {
 };
 
 // Filters shared by the sales list and its totals: branch scope, search text and an inclusive
-// sale date range. Search also matches the current product name and the sold serial numbers,
-// so callers must include Product.
+// sale date range. Search also matches the current product name, the linked customer's
+// current name / phone / company and the sold serial numbers, so callers must include Product
+// and Customer.
 // Returns { error } or { where }.
 const buildSaleWhere = (scope, query) => {
     // Branch members only ever get their own branch's sales
@@ -323,8 +411,13 @@ const buildSaleWhere = (scope, query) => {
             { customerName: like },
             { productName: like },
             { "$Product.name$": like },
+            { "$Customer.name$": like },
+            { "$Customer.companyName$": like },
             { serialNumbers: like },
-            ...(phoneSearch ? [{ customerPhone: { [Op.like]: `%${phoneSearch}%` } }] : []),
+            ...(phoneSearch ? [
+                { customerPhone: { [Op.like]: `%${phoneSearch}%` } },
+                { "$Customer.phone$": { [Op.like]: `%${phoneSearch}%` } },
+            ] : []),
         ];
     }
 
@@ -359,6 +452,7 @@ exports.sale = async (req, res) => {
             include: [
                 { model: Product, attributes: ["id", "name"], required: false },
                 { model: Branch, attributes: ["id", "name"], required: false },
+                { model: Customer, required: false },
             ],
             order: [["saleDate", "DESC"], ["id", "DESC"]],
             limit: pageSize,
@@ -394,7 +488,10 @@ exports.salesSummary = async (req, res) => {
         const [rows, branches] = await Promise.all([
             Sale.findAll({
                 where: filter.where,
-                include: [{ model: Product, attributes: [], required: false }],
+                include: [
+                    { model: Product, attributes: [], required: false },
+                    { model: Customer, attributes: [], required: false },
+                ],
                 attributes: ["branchId", [sequelize.fn("SUM", sequelize.col("Sale.sellingAmount")), "total"]],
                 group: ["Sale.branchId"],
                 raw: true,
@@ -427,10 +524,14 @@ exports.createSale = async (req, res) => {
         const branchError = await validateBranchForSale(values.branchId, scope);
         if (branchError) return sendError(res, branchError, null, 400);
 
-        const sale = await sequelize.transaction(async (transaction) => {
+        const sale = await saleTransaction(async (transaction) => {
+            // Rolled back with the sale if anything below fails
+            const customer = await resolveSaleCustomer(parsed.customer, { employeeId: req.employee.id, transaction });
+            const linked = { ...values, ...customerFields(customer), createdBy: req.employee.id };
+
             // "Other" products aren't in the catalogue, so no stock or serial numbers move
             if (!values.productId) {
-                return Sale.create({ ...values, createdBy: req.employee.id }, { transaction });
+                return Sale.create(linked, { transaction });
             }
 
             const product = await Product.findByPk(values.productId, { transaction });
@@ -440,13 +541,10 @@ exports.createSale = async (req, res) => {
             await takeStock({ ...values, transaction });
             const serialNumbers = await takeSerials({ ...values, transaction });
 
-            return Sale.create(
-                { ...values, serialNumbers, productName: product.name, createdBy: req.employee.id },
-                { transaction },
-            );
+            return Sale.create({ ...linked, serialNumbers, productName: product.name }, { transaction });
         });
 
-        return sendSuccess(res, "Sale added successfully", { id: sale.id }, 201);
+        return sendSuccess(res, "Sale added successfully", { id: sale.id, customerId: sale.customerId }, 201);
     } catch (error) {
         return sendSaleError(res, error);
     }
@@ -472,10 +570,15 @@ exports.updateSale = async (req, res) => {
             if (branchError) return sendError(res, branchError, null, 400);
         }
 
-        await sequelize.transaction(async (transaction) => {
+        const customerId = await saleTransaction(async (transaction) => {
             // Re-read under lock so two edits of the same sale can't both return its stock
             const sale = await findScopedSale(id, scope, { transaction, lock: transaction.LOCK.UPDATE });
             if (!sale) throw new SaleError(NOT_FOUND, 404);
+
+            // Only this sale's link changes; the customer record (shared with their other
+            // sales) is never edited from here
+            const customer = await resolveSaleCustomer(parsed.customer, { employeeId: req.employee.id, transaction });
+            Object.assign(values, customerFields(customer));
 
             // No product means "Other", which has no stock to take
             const product = values.productId ? await Product.findByPk(values.productId, { transaction }) : null;
@@ -489,7 +592,7 @@ exports.updateSale = async (req, res) => {
                 // Changed to "Other": everything the sale held goes back to stock
                 await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
                 await sale.update({ ...values, serialNumbers: [] }, { transaction });
-                return;
+                return customer.id;
             }
 
             const sameStock = sale.productId === values.productId && sale.branchId === values.branchId;
@@ -508,9 +611,10 @@ exports.updateSale = async (req, res) => {
 
             const serialNumbers = await takeSerials({ ...values, transaction });
             await sale.update({ ...values, serialNumbers, productName: product.name }, { transaction });
+            return customer.id;
         });
 
-        return sendSuccess(res, "Sale updated successfully", { id }, 200);
+        return sendSuccess(res, "Sale updated successfully", { id, customerId }, 200);
     } catch (error) {
         return sendSaleError(res, error);
     }

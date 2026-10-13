@@ -5,6 +5,7 @@ const Product = require('@/models/product.model')
 const ProductStock = require('@/models/productStock.model')
 const ProductSerial = require('@/models/productSerial.model')
 const Sale = require('@/models/sale.model')
+const Customer = require('@/models/customer.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -35,6 +36,11 @@ Sale.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
 Product.hasMany(Sale, {foreignKey: "productId", onDelete: "SET NULL"});
 Sale.belongsTo(Product, {foreignKey: "productId", onDelete: "SET NULL"});
 
+// A sale may belong to a customer. Older sales have none; deleting a customer keeps their
+// sales (each still has customerName and customerPhone), only the link is cleared.
+Customer.hasMany(Sale, {foreignKey: "customerId", onDelete: "SET NULL"});
+Sale.belongsTo(Customer, {foreignKey: "customerId", onDelete: "SET NULL"});
+
 module.exports = {
     Employee,
     Roles,
@@ -43,4 +49,5 @@ module.exports = {
     ProductStock,
     ProductSerial,
     Sale,
+    Customer,
 }
