@@ -66,14 +66,44 @@ export const productSchema = Yup.object({
 	branchId: Yup.string().required("Branch is required"),
 });
 
+// Optional customer fields, shared by the Customers module and new customers in the sale form
+const customerEmail = () => Yup.string().trim().email("Enter a valid email address").max(255, "Email must be at most 255 characters");
+const customerAddress = () => Yup.string().trim().max(500, "Address must be at most 500 characters");
+const customerPincode = () => Yup.string().trim().matches(/^[1-9]\d{5}$/, { message: "Enter a valid 6-digit pincode", excludeEmptyString: true });
+const customerCity = () => Yup.string().trim().max(100, "City must be at most 100 characters");
+const customerCompany = () => Yup.string().trim().max(255, "Name must be at most 255 characters");
+
+// Phone is optional for a customer (sales always need one); duplicates are checked by the API
+export const customerSchema = Yup.object({
+	name: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Customer name is required"),
+	phone: Yup.string().test("valid-phone", "Enter a valid phone number", (value) => !value || isValidPhoneNumber(value)),
+	email: customerEmail(),
+	address: customerAddress(),
+	pincode: customerPincode(),
+	city: customerCity(),
+	companyName: customerCompany(),
+});
+
 export const MAX_SALE_AMOUNT = 1000000000;
+
+// Optional details only apply while entering a new customer, not once one is picked
+const whenNewCustomer = (schema: Yup.StringSchema) => Yup.string().when("customer", {
+	is: (customer: unknown) => !customer,
+	then: () => schema,
+});
 
 // Stock availability is checked by the form against the selected branch's stock, and again by the API
 export const saleSchema = Yup.object({
+	customer: Yup.object().nullable(),
 	customerName: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Customer name is required"),
 	customerPhone: Yup.string()
 		.required("Customer phone number is required")
 		.test("valid-phone", "Enter a valid phone number", (value) => !value || isValidPhoneNumber(value)),
+	customerEmail: whenNewCustomer(customerEmail()),
+	customerAddress: whenNewCustomer(customerAddress()),
+	customerPincode: whenNewCustomer(customerPincode()),
+	customerCity: whenNewCustomer(customerCity()),
+	customerCompany: whenNewCustomer(customerCompany()),
 	productId: Yup.string().required("Product is required"),
 	productName: Yup.string().when("productId", {
 		is: OTHER_PRODUCT,

@@ -11,6 +11,7 @@ const employeeRoutes = require("@/routes/employee.route");
 const roleRoutes = require("@/routes/role.route");
 const productRoutes = require("@/routes/product.route");
 const saleRoutes = require("@/routes/sale.route");
+const customerRoutes = require("@/routes/customer.route");
 
 const app = express();
 app.use(cors());
@@ -27,6 +28,7 @@ app.use("/api/employee", employeeRoutes);
 app.use("/api/role", roleRoutes);
 app.use("/api/product", productRoutes);
 app.use("/api/sale", saleRoutes);
+app.use("/api/customer", customerRoutes);
 
 const PORT = process.env.PORT || 3000;
 

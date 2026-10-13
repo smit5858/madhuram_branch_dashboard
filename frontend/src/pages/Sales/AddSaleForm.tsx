@@ -1,12 +1,11 @@
 import { Field, Form, Formik, useField, useFormikContext } from "formik";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import toast from "react-hot-toast";
 import { Input } from "@/components/formik-fields/Input";
 import { Select, type SelectOption } from "@/components/formik-fields/Select";
-import { PhoneInput } from "@/components/formik-fields/PhoneInput";
 import { DatePicker, DATE_VALUE_FORMAT } from "@/components/formik-fields/DatePicker";
 import { Button } from "@/components/Button";
 import { Dialog } from "@/components/Dialog";
@@ -14,7 +13,8 @@ import saleService from "@/services/sale-service";
 import { saleSchema } from "@/validation/validation";
 import type { RootState } from "@/store/store";
 import type { IProductBranchScopeModel } from "@/models/Product";
-import { OTHER_PRODUCT, type ISaleFormValues, type ISaleModel } from "@/models/Sale";
+import { OTHER_PRODUCT, type ISaleCreateModel, type ISaleFormValues, type ISaleModel } from "@/models/Sale";
+import SaleCustomerFields from "./SaleCustomerFields";
 
 interface AddSaleFormProps {
     open: boolean;
@@ -252,6 +252,7 @@ const ProductAndQuantityFields = ({ sale }: { sale?: ISaleModel | null }) => {
 const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) => {
     const isEdit = !!sale;
     const { isAdmin } = scope;
+    const queryClient = useQueryClient();
     const today = useMemo(() => new Date(), []);
 
     // New sales go to active branches only; a sale's current branch stays listed while editing
@@ -260,9 +261,17 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
         .map((b) => ({ value: String(b.id), label: b.isActive ? b.name : `${b.name} (Inactive)` })),
     [scope.branch, isAdmin, sale]);
 
+    // A sale linked to a customer opens with that customer picked; older sales without one
+    // open with their saved name and phone typed in, and get linked when saved
     const initialValues = useMemo<ISaleFormValues>(() => ({
+        customer: sale?.customer ?? null,
         customerName: sale?.customerName ?? "",
         customerPhone: sale?.customerPhone ?? "",
+        customerEmail: "",
+        customerAddress: "",
+        customerPincode: "",
+        customerCity: "",
+        customerCompany: "",
         productId: !sale ? "" : sale.productId ? String(sale.productId) : OTHER_PRODUCT,
         productName: sale && !sale.productId ? sale.productName : "",
         quantity: sale?.quantity ?? 1,
@@ -275,9 +284,20 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
 
     const { mutate: saveSale, isPending } = useMutation({
         mutationFn: (values: ISaleFormValues) => {
-            const body = {
+            const body: ISaleCreateModel = {
+                customerId: values.customer?.id ?? null,
                 customerName: values.customerName.trim(),
                 customerPhone: values.customerPhone,
+                // Only used when the API creates a new customer; a picked customer is never changed
+                ...(!values.customer && {
+                    customerDetails: {
+                        email: values.customerEmail.trim(),
+                        address: values.customerAddress.trim(),
+                        pincode: values.customerPincode.trim(),
+                        city: values.customerCity.trim(),
+                        companyName: values.customerCompany.trim(),
+                    },
+                }),
                 ...(values.productId === OTHER_PRODUCT
                     ? { productId: null, productName: values.productName.trim() }
                     : { productId: Number(values.productId) }),
@@ -294,6 +314,9 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
             // http-service shows its own toast and resolves undefined for handled API errors
             if (response?.data?.status) {
                 toast.success(response.data.message || (isEdit ? "Sale updated successfully" : "Sale added successfully"));
+                // The sale may have saved a new customer; make them show up in suggestions
+                queryClient.invalidateQueries({ queryKey: ["customer-suggest"] });
+                queryClient.invalidateQueries({ queryKey: ["customers"] });
                 onSaved();
                 onClose();
             }
@@ -304,7 +327,9 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
     });
 
     return (
-        <Dialog open={open} onClose={onClose} title={isEdit ? "Edit Sale" : "Add Sale"} preventClose={isPending}>
+        <Dialog open={open} onClose={onClose} title={isEdit ? "Edit Sale" : "Add Sale"} preventClose={isPending}
+            // Scrolls on short screens once customer details or serial numbers make the form tall
+            className="max-h-[calc(100dvh-2rem)] overflow-y-auto!">
             <Formik
                 initialValues={initialValues}
                 validationSchema={saleSchema}
@@ -313,23 +338,8 @@ const AddSaleForm = ({ open, onClose, onSaved, scope, sale }: AddSaleFormProps) 
                 <Form className="flex flex-col gap-4" noValidate>
                     {isAdmin && <BranchProductSync sale={sale} />}
                     <ProductSerialSync sale={sale} />
-                    <div className="grid gap-4 sm:grid-cols-2">
-                        <Field
-                            id="customerName"
-                            name="customerName"
-                            label="Customer Name"
-                            placeholder="Enter customer name"
-                            component={Input}
-                            autoFocus
-                        />
-                        <Field
-                            id="customerPhone"
-                            name="customerPhone"
-                            label="Customer Phone Number"
-                            placeholder="Enter phone number"
-                            component={PhoneInput}
-                        />
-                    </div>
+                    <SaleCustomerFields autoFocus />
+                    <hr className="border-slate-100" />
                     <div className="grid gap-4 sm:grid-cols-2">
                         <div className="flex flex-col gap-1">
                             <Field

@@ -23,6 +23,12 @@ const Sale = sequelize.define(
             type: DataTypes.STRING,
             allowNull: false,
         },
+        // Linked customer record. Null for sales recorded before customers existed, or whose
+        // customer was deleted; customerName/customerPhone below always keep the details.
+        customerId: {
+            type: DataTypes.INTEGER,
+            allowNull: true,
+        },
         customerName: {
             type: DataTypes.STRING,
             allowNull: false,
@@ -73,7 +79,7 @@ const Sale = sequelize.define(
     {
         tableName: "sale",
         timestamps: true,
-        indexes: [{ fields: ["branchId", "saleDate"] }],
+        indexes: [{ fields: ["branchId", "saleDate"] }, { fields: ["customerId"] }],
     },
 )
 

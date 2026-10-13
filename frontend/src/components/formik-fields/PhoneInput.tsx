@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { getIn, type FieldInputProps, type FormikProps } from "formik";
-import { forwardRef, useCallback, useRef, useState, type MouseEvent } from "react";
+import { forwardRef, useCallback, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import PhoneInputModule, { type CountryData } from "react-phone-input-2";
 import 'react-phone-input-2/lib/style.css'
 import './PhoneInput.css'
@@ -23,6 +23,11 @@ interface PhoneInputProps {
     className?: string;
     field?: FieldInputProps<string>;
     form?: Pick<FormikProps<unknown>, "errors" | "touched" | "setFieldValue" | "setFieldTouched">;
+    onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
+    onFocus?: (e: FocusEvent<HTMLInputElement>) => void;
+    onBlur?: (e: FocusEvent<HTMLInputElement>) => void;
+    /** Extra attributes for the <input>, e.g. ARIA for an autocomplete */
+    inputProps?: Record<string, unknown>;
 }
 
 const DEFAULT_PREFERRED = ["in", "us", "gb", "ae", "au", "ca"];
@@ -32,7 +37,7 @@ const digitsOf = (value: string) => value.replace(/\D/g, "");
 const isCountryData = (data: CountryData | object): data is CountryData => "dialCode" in data;
 
 export const PhoneInput = forwardRef<HTMLInputElement, PhoneInputProps>(
-    ({ name, label, placeholder, country = "in", preferredCountries = DEFAULT_PREFERRED, value, onChange, error, disabled, className, field, form }, ref) => {
+    ({ name, label, placeholder, country = "in", preferredCountries = DEFAULT_PREFERRED, value, onChange, error, disabled, className, field, form, onKeyDown, onFocus, onBlur, inputProps }, ref) => {
         const fieldName = field?.name ?? name;
         const formError = fieldName && form && getIn(form.touched, fieldName)
             ? getIn(form.errors, fieldName)
@@ -68,8 +73,9 @@ export const PhoneInput = forwardRef<HTMLInputElement, PhoneInputProps>(
             onChange?.(next);
         };
 
-        const handleBlur = () => {
+        const handleBlur = (e: FocusEvent<HTMLInputElement>) => {
             if (fieldName) form?.setFieldTouched(fieldName, true);
+            onBlur?.(e);
         };
 
         const focusInput = (e: MouseEvent<HTMLDivElement>) => {
@@ -108,9 +114,11 @@ export const PhoneInput = forwardRef<HTMLInputElement, PhoneInputProps>(
                         value={raw ? `+${raw}` : ""}
                         onChange={handleChange}
                         onBlur={handleBlur}
+                        onFocus={onFocus}
+                        onKeyDown={onKeyDown}
                         placeholder={placeholder}
                         disabled={disabled}
-                        inputProps={{ id: fieldName, name: fieldName, "aria-invalid": !!displayError, ref: setInputRef }}
+                        inputProps={{ ...inputProps, id: fieldName, name: fieldName, "aria-invalid": !!displayError, ref: setInputRef }}
                         containerClass="phone-field"
                         inputClass="phone-field__input"
                         buttonClass="phone-field__button"
