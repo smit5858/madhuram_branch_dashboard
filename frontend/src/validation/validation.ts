@@ -142,3 +142,25 @@ export const productFilterSchema = Yup.object({
 			return !value || !isCompleteDate(value) || !isCompleteDate(startDate) || value >= startDate;
 		}),
 });
+
+export const MAX_LEDGER_AMOUNT = 1000000000;
+
+// Income and expense entries; the API checks the same rules and the branch access again
+export const ledgerEntrySchema = (withPaymentMethod: boolean) => Yup.object({
+	entryDate: Yup.string()
+		.required("Date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	amount: Yup.number()
+		.typeError("Amount must be a number")
+		.moreThan(0, "Amount must be greater than 0")
+		.max(MAX_LEDGER_AMOUNT, "Amount is too large")
+		.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
+		.required("Amount is required"),
+	category: Yup.string().required("Category is required"),
+	description: Yup.string().trim().max(1000, "Description must be at most 1000 characters").when("category", {
+		is: "Other",
+		then: (schema) => schema.required("Add a description for the Other category"),
+	}),
+	paymentMethod: withPaymentMethod ? Yup.string().required("Payment method is required") : Yup.string(),
+	branchId: Yup.string().required("Branch is required"),
+});

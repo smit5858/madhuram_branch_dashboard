@@ -12,6 +12,8 @@ const roleRoutes = require("@/routes/role.route");
 const productRoutes = require("@/routes/product.route");
 const saleRoutes = require("@/routes/sale.route");
 const customerRoutes = require("@/routes/customer.route");
+const incomeRoutes = require("@/routes/income.route");
+const expenseRoutes = require("@/routes/expense.route");
 
 const app = express();
 app.use(cors());
@@ -29,6 +31,8 @@ app.use("/api/role", roleRoutes);
 app.use("/api/product", productRoutes);
 app.use("/api/sale", saleRoutes);
 app.use("/api/customer", customerRoutes);
+app.use("/api/income", incomeRoutes);
+app.use("/api/expense", expenseRoutes);
 
 const PORT = process.env.PORT || 3000;
 

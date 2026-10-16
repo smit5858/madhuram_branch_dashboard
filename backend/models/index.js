@@ -6,6 +6,8 @@ const ProductStock = require('@/models/productStock.model')
 const ProductSerial = require('@/models/productSerial.model')
 const Sale = require('@/models/sale.model')
 const Customer = require('@/models/customer.model')
+const Income = require('@/models/income.model')
+const Expense = require('@/models/expense.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -41,6 +43,14 @@ Sale.belongsTo(Product, {foreignKey: "productId", onDelete: "SET NULL"});
 Customer.hasMany(Sale, {foreignKey: "customerId", onDelete: "SET NULL"});
 Sale.belongsTo(Customer, {foreignKey: "customerId", onDelete: "SET NULL"});
 
+// Income and expense entries are owned by their branch, like sales. The employee who added an
+// entry is linked for display; deleting that employee keeps the entry, only the link is cleared.
+for (const Ledger of [Income, Expense]) {
+    Branch.hasMany(Ledger, {foreignKey: "branchId", onDelete: "CASCADE"});
+    Ledger.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
+    Ledger.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+}
+
 module.exports = {
     Employee,
     Roles,
@@ -50,4 +60,6 @@ module.exports = {
     ProductSerial,
     Sale,
     Customer,
+    Income,
+    Expense,
 }
