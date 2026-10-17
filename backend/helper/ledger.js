@@ -520,6 +520,12 @@ const createLedgerController = ({ Model, label, singular, categories, withPaymen
 };
 
 module.exports = {
+    LedgerError,
+    parseId,
+    isSent,
+    parseAmount,
+    parseEntryDate,
+    parseDescription,
     INCOME_CATEGORIES,
     EXPENSE_CATEGORIES,
     PAYMENT_METHODS,

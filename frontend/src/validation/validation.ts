@@ -164,3 +164,54 @@ export const ledgerEntrySchema = (withPaymentMethod: boolean) => Yup.object({
 	paymentMethod: withPaymentMethod ? Yup.string().required("Payment method is required") : Yup.string(),
 	branchId: Yup.string().required("Branch is required"),
 });
+
+// Rajkot Expense entries; the API checks the same rules, the branch's stock and access again
+export const rajkotExpenseSchema = Yup.object({
+	branchId: Yup.string().required("Branch is required"),
+	entryDate: Yup.string()
+		.required("Date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	description: Yup.string().trim().max(1000, "Description must be at most 1000 characters"),
+	items: Yup.array()
+		.of(Yup.object({
+			productId: Yup.string().required("Select a product"),
+			hasSerialNumber: Yup.boolean(),
+			// Serialized products take their quantity from the serial numbers picked
+			quantity: Yup.mixed().when("hasSerialNumber", {
+				is: true,
+				then: (schema) => schema.notRequired(),
+				otherwise: () => Yup.number()
+					.typeError("Quantity must be a number")
+					.integer("Quantity must be a whole number")
+					.min(1, "Quantity must be at least 1")
+					.max(MAX_PRODUCT_QUANTITY, "Quantity is too large")
+					.required("Quantity is required"),
+			}),
+			// New serial numbers, one per line; repeats and ones that already exist are flagged by the row itself
+			serialText: Yup.string().when("hasSerialNumber", {
+				is: true,
+				then: (schema) => schema
+					.test("serial-required", "Enter at least one serial number", (value) => splitSerialNumbers(value).length > 0)
+					.test("serial-length", "Each serial number must be at most 100 characters", (value) => splitSerialNumbers(value).every((sn) => sn.length <= 100)),
+			}),
+			amount: Yup.number()
+				.typeError("Amount must be a number")
+				.moreThan(0, "Amount must be greater than 0")
+				.max(MAX_LEDGER_AMOUNT, "Amount is too large")
+				.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
+				.required("Amount is required"),
+		}))
+		.min(1, "Add at least one product")
+		.max(100, "At most 100 products in one entry"),
+});
+
+// Balance an admin sets by hand from the Rajkot Expense page
+export const rajkotExpenseBalanceSchema = Yup.object({
+	branchId: Yup.string().required("Branch is required"),
+	balance: Yup.number()
+		.typeError("Balance must be a number")
+		.min(0, "Balance cannot be negative")
+		.max(99999999999999, "Balance is too large")
+		.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
+		.required("Balance is required"),
+});

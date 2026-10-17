@@ -8,6 +8,10 @@ const Sale = require('@/models/sale.model')
 const Customer = require('@/models/customer.model')
 const Income = require('@/models/income.model')
 const Expense = require('@/models/expense.model')
+const RajkotExpense = require('@/models/rajkotExpense.model')
+const RajkotExpenseItem = require('@/models/rajkotExpenseItem.model')
+const RajkotExpenseSerial = require('@/models/rajkotExpenseSerial.model')
+const RajkotExpenseCounter = require('@/models/rajkotExpenseCounter.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -51,6 +55,26 @@ for (const Ledger of [Income, Expense]) {
     Ledger.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
 }
 
+// Rajkot Expense entries are owned by their branch, like sales. Their product rows and serial
+// numbers go with the entry. Removing a product from the catalogue keeps the rows (each still
+// has productName), only the link is cleared; the same goes for the employees on an entry.
+Branch.hasMany(RajkotExpense, {foreignKey: "branchId", onDelete: "CASCADE"});
+RajkotExpense.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
+RajkotExpense.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+RajkotExpense.belongsTo(Employee, {foreignKey: "acceptedBy", as: "acceptor", onDelete: "SET NULL"});
+
+RajkotExpense.hasMany(RajkotExpenseItem, {foreignKey: "rajkotExpenseId", as: "items", onDelete: "CASCADE"});
+RajkotExpenseItem.belongsTo(RajkotExpense, {foreignKey: "rajkotExpenseId", onDelete: "CASCADE"});
+
+Product.hasMany(RajkotExpenseItem, {foreignKey: "productId", onDelete: "SET NULL"});
+RajkotExpenseItem.belongsTo(Product, {foreignKey: "productId", onDelete: "SET NULL"});
+
+RajkotExpenseItem.hasMany(RajkotExpenseSerial, {foreignKey: "rajkotExpenseItemId", as: "serials", onDelete: "CASCADE"});
+RajkotExpenseSerial.belongsTo(RajkotExpenseItem, {foreignKey: "rajkotExpenseItemId", onDelete: "CASCADE"});
+
+Branch.hasOne(RajkotExpenseCounter, {foreignKey: "branchId", onDelete: "CASCADE"});
+RajkotExpenseCounter.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
+
 module.exports = {
     Employee,
     Roles,
@@ -62,4 +86,8 @@ module.exports = {
     Customer,
     Income,
     Expense,
+    RajkotExpense,
+    RajkotExpenseItem,
+    RajkotExpenseSerial,
+    RajkotExpenseCounter,
 }

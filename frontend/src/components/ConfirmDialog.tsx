@@ -11,6 +11,8 @@ interface ConfirmDialogProps {
     confirmLabel?: string;
     cancelLabel?: string;
     loading?: boolean;
+    /** Colour of the confirm button: red for destructive actions (default), blue otherwise */
+    tone?: "danger" | "primary";
 }
 
 export const ConfirmDialog = ({
@@ -22,9 +24,10 @@ export const ConfirmDialog = ({
     confirmLabel = "Delete",
     cancelLabel = "Cancel",
     loading = false,
+    tone = "danger",
 }: ConfirmDialogProps) => (
     <Dialog open={open} onClose={onClose} title={title} preventClose={loading} className="max-w-md">
-        <p className="text-sm text-gray-600">{message}</p>
+        <div className="text-sm text-gray-600">{message}</div>
         <div className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button
                 onClick={onClose}
@@ -36,7 +39,9 @@ export const ConfirmDialog = ({
             <Button
                 onClick={onConfirm}
                 loading={loading}
-                className="sm:w-auto bg-red-500! hover:bg-red-600! focus-visible:ring-red-500! disabled:hover:bg-red-500!"
+                className={tone === "danger"
+                    ? "sm:w-auto bg-red-500! hover:bg-red-600! focus-visible:ring-red-500! disabled:hover:bg-red-500!"
+                    : "sm:w-auto"}
             >
                 {confirmLabel}
             </Button>

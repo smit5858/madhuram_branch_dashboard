@@ -11,7 +11,8 @@
     "migrate:employee-branch": "node migrations/add-employee-branch.js",
     "migrate:product-serial-numbers": "node migrations/add-product-serial-numbers.js",
     "migrate:customers": "node migrations/add-customers.js",
-    "migrate:income-expense": "node migrations/add-income-expense.js"
+    "migrate:income-expense": "node migrations/add-income-expense.js",
+    "migrate:rajkot-expense": "node migrations/add-rajkot-expense.js"
   },
   "overrides": {
     "uuid": "^11.0.0"

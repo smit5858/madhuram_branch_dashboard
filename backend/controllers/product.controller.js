@@ -92,6 +92,9 @@ const findExistingSerials = async (serials, transaction) => {
     return serials.filter((sn) => existing.has(sn.toLowerCase()));
 };
 
+// Also used by Rajkot Expense, so new serial numbers follow the same never-reused rule there
+exports.findExistingSerials = findExistingSerials;
+
 // Refuses serial numbers that already exist (in stock or sold)
 const assertSerialsFree = async (serials, transaction) => {
     const existing = await findExistingSerials(serials, transaction);
