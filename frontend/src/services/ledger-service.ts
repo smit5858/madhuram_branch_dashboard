@@ -1,6 +1,6 @@
 import type {
-    ILedgerCreateModel, ILedgerFilterParams, ILedgerOptionsModel, ILedgerRequestModel,
-    ILedgerResponseModel, ILedgerSummaryModel, LedgerKind,
+    ILedgerBalanceModel, ILedgerBalanceTargetModel, ILedgerCreateModel, ILedgerFilterParams, ILedgerOptionsModel,
+    ILedgerRequestModel, ILedgerResponseModel, ILedgerSummaryModel, LedgerKind,
 } from "@/models/Ledger";
 import httpService from "./http-service";
 import type { AxiosResponse } from "axios";
@@ -30,7 +30,19 @@ const createLedgerService = (kind: LedgerKind) => {
     const remove = async (id: number): Promise<AxiosResponse<ApiResponseModel<null>>> =>
         httpService.delete<ApiResponseModel<null>>(`${base}/${id}`);
 
-    return { options, list, summary, create, update, remove };
+    /** Stored Total Balance per branch, with the balance recalculated from the records */
+    const balance = async (branchId?: number): Promise<AxiosResponse<ApiResponseModel<ILedgerBalanceModel>>> =>
+        httpService.get<ApiResponseModel<ILedgerBalanceModel>>(`${base}/balance`, { params: { branchId } });
+
+    /** Saves the amount entered (admins), or recalculates the balance (no branch: own branch, or every branch for admins) */
+    const updateBalance = async (target: ILedgerBalanceTargetModel): Promise<AxiosResponse<ApiResponseModel<{ balance: number }>>> =>
+        httpService.post<ApiResponseModel<{ balance: number }>>(`${base}/balance/update`, target);
+
+    /** Admins only: sets one branch's balance to 0; entries and sales are kept */
+    const resetBalance = async (target: { branchId: number }): Promise<AxiosResponse<ApiResponseModel<{ previousBalance: number; balance: number }>>> =>
+        httpService.post<ApiResponseModel<{ previousBalance: number; balance: number }>>(`${base}/balance/reset`, target);
+
+    return { options, list, summary, create, update, remove, balance, updateBalance, resetBalance };
 };
 
 export type LedgerService = ReturnType<typeof createLedgerService>;

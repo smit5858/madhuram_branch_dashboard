@@ -47,7 +47,7 @@ const ErrorPage = () => {
                     <h1 className="text-2xl font-semibold">{title}</h1>
                     <p className="text-slate-400">{message}</p>
                     {!isNotFound && details && (
-                        <pre className="mt-4 max-h-32 overflow-auto rounded-xl bg-white/5 p-3 text-left text-xs text-slate-400 whitespace-pre-wrap break-words">
+                        <pre className="mt-4 max-h-32 overflow-auto rounded-xl bg-white/5 p-3 text-left text-xs text-slate-400 whitespace-pre-wrap wrap-break-word">
                             {details}
                         </pre>
                     )}

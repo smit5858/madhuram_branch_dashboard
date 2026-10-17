@@ -12,6 +12,7 @@ const RajkotExpense = require('@/models/rajkotExpense.model')
 const RajkotExpenseItem = require('@/models/rajkotExpenseItem.model')
 const RajkotExpenseSerial = require('@/models/rajkotExpenseSerial.model')
 const RajkotExpenseCounter = require('@/models/rajkotExpenseCounter.model')
+const LedgerBalance = require('@/models/ledgerBalance.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -55,6 +56,10 @@ for (const Ledger of [Income, Expense]) {
     Ledger.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
 }
 
+// Each branch has one income and one expense balance row; they go away with the branch
+Branch.hasMany(LedgerBalance, {foreignKey: "branchId", onDelete: "CASCADE"});
+LedgerBalance.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
+
 // Rajkot Expense entries are owned by their branch, like sales. Their product rows and serial
 // numbers go with the entry. Removing a product from the catalogue keeps the rows (each still
 // has productName), only the link is cleared; the same goes for the employees on an entry.
@@ -90,4 +95,5 @@ module.exports = {
     RajkotExpenseItem,
     RajkotExpenseSerial,
     RajkotExpenseCounter,
+    LedgerBalance,
 }

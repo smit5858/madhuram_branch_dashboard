@@ -13,6 +13,7 @@ import CustomTable, { type TableColumn } from "@/components/CustomTable";
 import { DateToDateStringWithMonth } from "@/util/DateFormate";
 import LedgerFilters from "./LedgerFilters";
 import LedgerSummary from "./LedgerSummary";
+import LedgerBalance from "./LedgerBalance";
 import AddLedgerEntryForm from "./AddLedgerEntryForm";
 import { ALL, currency, defaultFilters, periodLabel, toFilterParams, type LedgerConfig, type LedgerFilterValues } from "./ledgerConfig";
 
@@ -160,6 +161,17 @@ const LedgerPage = ({ config }: { config: LedgerConfig }) => {
 
     return (
         <div className="p-6 bg-white rounded-xl shadow-md flex flex-col gap-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                    <h3 className="text-lg font-semibold text-slate-800">{config.title}</h3>
+                    <p className="mt-1 max-w-xl text-sm text-slate-500">
+                        Total Balance counts the {config.noun} entries{config.kind === "income" ? " and product sales" : ""} recorded since
+                        the branch's last reset. The totals below follow the selected filters.
+                    </p>
+                </div>
+                <LedgerBalance config={config} branchId={filterBranchId} branchName={branchName} refreshKey={refreshKey} />
+            </div>
+
             <LedgerSummary config={config} isAdmin={isAdmin} params={params} period={period} branchName={branchName} refreshKey={refreshKey} salesCategory={options.salesCategory} />
 
             <LedgerFilters config={config} options={options} onChange={setFilters} onAdd={() => setForm({ open: true, entry: null })} />

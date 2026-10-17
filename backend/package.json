@@ -12,7 +12,8 @@
     "migrate:product-serial-numbers": "node migrations/add-product-serial-numbers.js",
     "migrate:customers": "node migrations/add-customers.js",
     "migrate:income-expense": "node migrations/add-income-expense.js",
-    "migrate:rajkot-expense": "node migrations/add-rajkot-expense.js"
+    "migrate:rajkot-expense": "node migrations/add-rajkot-expense.js",
+    "migrate:ledger-balance": "node migrations/add-ledger-balance.js"
   },
   "overrides": {
     "uuid": "^11.0.0"

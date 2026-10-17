@@ -110,3 +110,45 @@ export interface ILedgerFormValues {
     paymentMethod: string;
     branchId: string;
 }
+
+/** Total Balance of one branch (income and expense balances are kept apart) */
+export interface ILedgerBalanceBranchModel {
+    branchId: number;
+    branchName: string;
+    /** Stored balance; for a branch never updated or reset, the calculated one */
+    balance: number;
+    /** Recalculated from the entries (income: and sales) recorded after the last reset */
+    calculatedBalance: number;
+    /** Income only: parts of calculatedBalance */
+    entriesTotal?: number;
+    salesTotal?: number;
+    resetAt: string | null;
+    balanceUpdatedAt: string | null;
+}
+
+export interface ILedgerBalanceModel {
+    /** Members get only their own branch; admins every branch, or the one they filtered on */
+    branch: ILedgerBalanceBranchModel[];
+    balance: number;
+    calculatedBalance: number;
+    entriesTotal?: number;
+    salesTotal?: number;
+    /** Decided by the API, which checks it again on update / reset */
+    canUpdate: boolean;
+    /** Admins: Update Balance can save an amount they enter */
+    canSetAmount: boolean;
+    canReset: boolean;
+}
+
+/** No branch: the member's own branch, or every branch for an admin's update */
+export interface ILedgerBalanceTargetModel {
+    branchId?: number;
+    /** Update Balance, admins only: save this amount as the branch's balance (needs branchId) */
+    balance?: number;
+}
+
+/** Update Balance form state */
+export interface ILedgerBalanceFormValues {
+    branchId: string;
+    balance: number | "";
+}

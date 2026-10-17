@@ -215,3 +215,6 @@ export const rajkotExpenseBalanceSchema = Yup.object({
 		.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
 		.required("Balance is required"),
 });
+
+// Income / Expense Update Balance form: same rules as the Rajkot Expense balance
+export const ledgerBalanceSchema = rajkotExpenseBalanceSchema;
