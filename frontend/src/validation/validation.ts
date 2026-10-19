@@ -48,9 +48,11 @@ export const splitSerialNumbers = (text?: string) =>
 
 export const productSchema = Yup.object({
 	name: Yup.string().trim().max(255, "Name must be at most 255 characters").required("Product name is required"),
-	hasSerialNumber: Yup.boolean(),
-	// Serial-tracked products take serial numbers instead of a quantity
-	quantity: Yup.mixed().when("hasSerialNumber", ([hasSerialNumber]: boolean[]) => hasSerialNumber
+	productType: Yup.string().oneOf(["Standard", "Serialized", "Software", "Service"]).required(),
+	licenseReassignable: Yup.boolean(),
+	// Only Standard products take a quantity: serialized ones take serial numbers, software takes
+	// license keys and services have no stock
+	quantity: Yup.mixed().when("productType", ([productType]: string[]) => productType !== "Standard"
 		? Yup.mixed().notRequired()
 		: Yup.number()
 			.typeError("Quantity must be a number")
@@ -58,7 +60,7 @@ export const productSchema = Yup.object({
 			.min(0, "Quantity cannot be negative")
 			.max(MAX_PRODUCT_QUANTITY, "Quantity is too large")
 			.required("Quantity is required")),
-	serialNumbers: Yup.string().when("hasSerialNumber", ([hasSerialNumber]: boolean[], schema: Yup.StringSchema) => hasSerialNumber
+	serialNumbers: Yup.string().when("productType", ([productType]: string[], schema: Yup.StringSchema) => productType === "Serialized" || productType === "Software"
 		? schema
 			// Repeats and serial numbers that already exist are checked by the form field itself
 			.test("serial-length", "Each serial number must be at most 100 characters", (value) => splitSerialNumbers(value).every((sn) => sn.length <= 100))
@@ -85,6 +87,9 @@ export const customerSchema = Yup.object({
 });
 
 export const MAX_SALE_AMOUNT = 1000000000;
+
+/** Installations in one sale of an installation service (each gets its own installation ID) */
+export const MAX_SERVICE_UNITS = 100;
 
 // Optional details only apply while entering a new customer, not once one is picked
 const whenNewCustomer = (schema: Yup.StringSchema) => Yup.string().when("customer", {
@@ -218,3 +223,41 @@ export const rajkotExpenseBalanceSchema = Yup.object({
 
 // Income / Expense Update Balance form: same rules as the Rajkot Expense balance
 export const ledgerBalanceSchema = rajkotExpenseBalanceSchema;
+
+const twoDecimals = (value?: number) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value));
+
+// Optional purchase details when adding serial-tracked units
+export const purchaseDetailsSchema = {
+	supplierName: Yup.string().trim().max(255, "Supplier name must be at most 255 characters"),
+	purchaseDate: Yup.string().test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	unitAmount: Yup.number()
+		.typeError("Purchase price must be a number")
+		.min(0, "Purchase price cannot be negative")
+		.max(MAX_PRODUCT_QUANTITY, "Purchase price is too large")
+		.test("two-decimals", "At most 2 decimal places", twoDecimals),
+	purchaseReference: Yup.string().trim().max(100, "Invoice / reference number must be at most 100 characters"),
+};
+
+// Customer return of one serial-tracked unit. The refund limit (the unit's share of the sale) is
+// checked by the form, since it depends on the unit picked
+export const saleReturnSchema = Yup.object({
+	serialNumber: Yup.string().required("Select the serial number being returned"),
+	returnDate: Yup.string()
+		.required("Return date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	condition: Yup.string().required("Condition is required"),
+	refundAmount: Yup.number()
+		.typeError("Refund amount must be a number")
+		.min(0, "Refund amount cannot be negative")
+		.test("two-decimals", "At most 2 decimal places", twoDecimals),
+	reason: Yup.string().trim().max(500, "Reason must be at most 500 characters").required("Return reason is required"),
+	branchId: Yup.string().required("Receiving branch is required"),
+});
+
+export const serialTransferSchema = Yup.object({
+	toBranchId: Yup.string().required("Select the branch to transfer to"),
+	transferDate: Yup.string()
+		.required("Transfer date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	note: Yup.string().trim().max(500, "Note must be at most 500 characters"),
+});

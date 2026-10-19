@@ -70,6 +70,13 @@ const Sale = sequelize.define(
             type: DataTypes.DATEONLY,
             allowNull: false,
         },
+        // "Sale", or "Renewal" for a software license renewal (recorded from the license's
+        // history; it can be deleted, which cancels the renewal, but not edited)
+        saleType: {
+            type: DataTypes.STRING(20),
+            allowNull: false,
+            defaultValue: "Sale",
+        },
         // Employee who recorded the sale
         createdBy: {
             type: DataTypes.INTEGER,

@@ -1,14 +1,22 @@
 const { Op } = require("sequelize");
 const sequelize = require("@/config/db");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Product, ProductStock, ProductSerial, Branch, Sale } = require("@/models/index");
+const { Product, ProductStock, ProductSerial, Branch, Sale, ProductPurchase, SerialUnit } = require("@/models/index");
+const { EVENT, UNIT_STATUS, localDate, registerStock, removeFromStock } = require("@/helper/serialHistory");
+const { PRODUCT_TYPE, PRODUCT_TYPES, typeOf, usesSerialNumbers } = require("@/helper/productType");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
 //
 // Serial numbers: a product either has none (stock is a plain quantity) or tracks one serial
 // number per unit (product.hasSerialNumber). For tracked products every in-stock unit is a
-// product_serial row and the branch's quantity is always the number of those rows.
+// product_serial row and the branch's quantity is always the number of those rows. Every unit
+// added, removed or deleted here is also recorded in its serial number history (helper/serialHistory.js).
+//
+// Product types (helper/productType.js): Software products take license keys instead. They join
+// the branch's license pool (serial_unit only) and the branch's quantity stays 0, so physical
+// stock never moves. Service products have nothing to stock; their branch row only marks that
+// the branch offers the service.
 
 const MAX_QUANTITY = 1000000000;
 const MAX_SERIALS = 1000;
@@ -70,6 +78,54 @@ const parseSerialNumbers = (list) => {
     return { value: serials };
 };
 
+const AMOUNT_REGEX = /^\d+(\.\d{1,2})?$/;
+const MAX_AMOUNT = 1000000000;
+
+// Optional purchase details for serial-tracked units being added: { supplierName, purchaseDate,
+// unitAmount, reference }. Everything is optional; the date defaults to today. Returns { error } or { value }.
+const parsePurchase = (purchase) => {
+    const empty = { supplierName: null, purchaseDate: localDate(), unitAmount: null, reference: null };
+    if (purchase === undefined || purchase === null) return { value: empty };
+    if (typeof purchase !== "object" || Array.isArray(purchase)) return { error: "Invalid purchase details" };
+
+    const text = (value, label, max) => {
+        if (value === undefined || value === null || value === "") return { value: null };
+        if (typeof value !== "string") return { error: `Invalid ${label.toLowerCase()}` };
+        const trimmed = value.trim();
+        if (trimmed.length > max) return { error: `${label} must be at most ${max} characters` };
+        return { value: trimmed || null };
+    };
+    const supplier = text(purchase.supplierName, "Supplier / dealer name", 255);
+    if (supplier.error) return supplier;
+    const ref = text(purchase.reference, "Invoice / reference number", 100);
+    if (ref.error) return ref;
+
+    let purchaseDate = empty.purchaseDate;
+    if (purchase.purchaseDate !== undefined && purchase.purchaseDate !== null && purchase.purchaseDate !== "") {
+        const date = parseDate(purchase.purchaseDate);
+        if (!date) return { error: "Invalid purchase date" };
+        // One day of slack so a client ahead of the server's timezone can still record "today"
+        const latest = new Date();
+        latest.setHours(0, 0, 0, 0);
+        latest.setDate(latest.getDate() + 1);
+        if (date > latest) return { error: "Purchase date cannot be in the future" };
+        purchaseDate = purchase.purchaseDate;
+    }
+
+    let unitAmount = null;
+    const raw = purchase.unitAmount;
+    if (raw !== undefined && raw !== null && raw !== "") {
+        const n = typeof raw === "string" ? Number(raw) : raw;
+        if (typeof n !== "number" || !Number.isFinite(n)) return { error: "Purchase amount must be a number" };
+        if (n < 0) return { error: "Purchase amount cannot be negative" };
+        if (n > MAX_AMOUNT) return { error: `Purchase amount must be at most ${MAX_AMOUNT.toLocaleString("en-IN")}` };
+        if (!AMOUNT_REGEX.test(String(n))) return { error: "Purchase amount can have at most 2 decimal places" };
+        unitAmount = n;
+    }
+
+    return { value: { supplierName: supplier.value, purchaseDate, unitAmount, reference: ref.value } };
+};
+
 const listForMessage = (serials) => (serials.length > 5 ? `${serials.slice(0, 5).join(", ")} and ${serials.length - 5} more` : serials.join(", "));
 
 // Which of these serial numbers already exist anywhere: in stock (any product or branch) or
@@ -88,7 +144,15 @@ const findExistingSerials = async (serials, transaction) => {
     });
     const sold = new Set(sales.flatMap((sale) => sale.serialNumbers).map((sn) => sn.toLowerCase()));
 
-    const existing = new Set([...inStock.map((r) => r.serialNumber.toLowerCase()), ...sold]);
+    // Licenses never have a product_serial row, so the ones in a license pool (or cancelled)
+    // are found here. Only a unit taken out of stock (Removed) may be added again.
+    const registered = await SerialUnit.findAll({
+        where: { serialNumber: serials, status: { [Op.ne]: UNIT_STATUS.REMOVED } },
+        attributes: ["serialNumber"],
+        transaction,
+    });
+
+    const existing = new Set([...inStock.map((r) => r.serialNumber.toLowerCase()), ...sold, ...registered.map((r) => r.serialNumber.toLowerCase())]);
     return serials.filter((sn) => existing.has(sn.toLowerCase()));
 };
 
@@ -128,25 +192,60 @@ const validateBranchForNewStock = async (branchId, scope) => {
     return null;
 };
 
+// History for the in-stock units of a product (one branch, or every branch) that is being deleted
+const recordSerialsRemoved = async ({ productId, productName, branchId, employeeId, transaction }) => {
+    const rows = await ProductSerial.findAll({
+        where: { productId, ...(branchId ? { branchId } : {}) },
+        attributes: ["serialNumber", "branchId"],
+        raw: true,
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+    });
+    // Licenses still in a pool have no product_serial row
+    const licenses = await SerialUnit.findAll({
+        where: { productId, productType: PRODUCT_TYPE.SOFTWARE, status: UNIT_STATUS.AVAILABLE, ...(branchId ? { branchId } : {}) },
+        attributes: ["serialNumber", "branchId"],
+        raw: true,
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+    });
+    rows.push(...licenses);
+    const byBranch = new Map();
+    for (const row of rows) {
+        if (!byBranch.has(row.branchId)) byBranch.set(row.branchId, []);
+        byBranch.get(row.branchId).push(row.serialNumber);
+    }
+    for (const [stockBranchId, serials] of byBranch) {
+        await removeFromStock({ serials, productId, productName, branchId: stockBranchId, note: "Product deleted from stock", employeeId, transaction });
+    }
+};
+
 // A product without stock in any branch is no longer listed anywhere, so drop it
 const removeIfOrphaned = async (productId, transaction) => {
     const remaining = await ProductStock.count({ where: { productId }, transaction });
     if (remaining === 0) await Product.destroy({ where: { id: productId }, transaction });
 };
 
-// serialsByStock: Map of "productId:branchId" -> in-stock serial numbers
-const toProductResponse = (product, serialsByStock) => {
+// serialsByStock: Map of "productId:branchId" -> in-stock serial numbers (or available license keys)
+// licenseCounts: Map of "productId:branchId" -> available licenses (every branch, even for members)
+const toProductResponse = (product, serialsByStock, licenseCounts = new Map()) => {
+    const type = typeOf(product);
     const stocks = (product.stocks ?? []).map((s) => ({
         id: s.id,
         branchId: s.branchId,
         branchName: s.Branch?.name ?? null,
         quantity: s.quantity,
         serialNumbers: serialsByStock.get(`${product.id}:${s.branchId}`) ?? [],
+        // Software only: licenses in this branch's pool. Their quantity is always 0 (no physical stock).
+        licenseCount: type === PRODUCT_TYPE.SOFTWARE ? licenseCounts.get(`${product.id}:${s.branchId}`) ?? 0 : null,
         updatedAt: s.updatedAt,
     }));
     const lastUpdated = stocks.reduce((latest, s) => (!latest || s.updatedAt > latest ? s.updatedAt : latest), null);
 
-    return { id: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, updatedAt: lastUpdated ?? product.updatedAt, stocks };
+    return {
+        id: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, productType: type,
+        licenseReassignable: product.licenseReassignable, updatedAt: lastUpdated ?? product.updatedAt, stocks,
+    };
 };
 
 const sendProductError = (res, error) => {
@@ -187,8 +286,17 @@ exports.product = async (req, res) => {
         const pageSize = Math.max(parseInt(req.query.pageSize, 10) || 10, 1);
         const offset = (page - 1) * pageSize;
 
-        // Search matches the product name or any in-stock serial number the user can see
+        // productTypes: comma-separated list ("Software" for the Software Licenses page, the
+        // others for Products); every type when left out
         const where = {};
+        if (typeof req.query.productTypes === "string" && req.query.productTypes.trim()) {
+            const types = req.query.productTypes.split(",").map((t) => t.trim()).filter(Boolean);
+            if (types.some((t) => !PRODUCT_TYPES.includes(t))) return sendError(res, "Invalid product type", null, 400);
+            // Products saved before product types existed are Standard or Serialized
+            where.productType = types;
+        }
+
+        // Search matches the product name or any in-stock serial number the user can see
         const search = req.query.search?.trim();
         if (search) {
             const pattern = sequelize.escape(`%${search}%`);
@@ -196,6 +304,8 @@ exports.product = async (req, res) => {
             where[Op.or] = [
                 { name: { [Op.like]: `%${search}%` } },
                 { id: { [Op.in]: sequelize.literal(`(SELECT productId FROM product_serial WHERE serialNumber LIKE ${pattern}${branchFilter})`) } },
+                // Available license keys (they have no product_serial row)
+                { id: { [Op.in]: sequelize.literal(`(SELECT productId FROM serial_unit WHERE productType = 'Software' AND status = 'Available' AND productId IS NOT NULL AND serialNumber LIKE ${pattern}${branchFilter})`) } },
             ];
         }
 
@@ -224,7 +334,7 @@ exports.product = async (req, res) => {
         // and only those stock rows are returned
         const { count, rows } = await Product.findAndCountAll({
             where,
-            attributes: ["id", "name", "hasSerialNumber", "updatedAt"],
+            attributes: ["id", "name", "hasSerialNumber", "productType", "licenseReassignable", "updatedAt"],
             include: [{
                 model: ProductStock,
                 as: "stocks",
@@ -247,15 +357,30 @@ exports.product = async (req, res) => {
             order: [["serialNumber", "ASC"]],
             raw: true,
         });
+        // Software products' available licenses, all branches (keys only for the branches the user may see)
+        const softwareIds = rows.filter((p) => typeOf(p) === PRODUCT_TYPE.SOFTWARE).map((p) => p.id);
+        const licenses = softwareIds.length === 0 ? [] : await SerialUnit.findAll({
+            where: { productId: softwareIds, productType: PRODUCT_TYPE.SOFTWARE, status: UNIT_STATUS.AVAILABLE },
+            attributes: ["productId", "branchId", "serialNumber"],
+            order: [["serialNumber", "ASC"]],
+            raw: true,
+        });
+        const licenseCounts = new Map();
+        for (const l of licenses) {
+            const key = `${l.productId}:${l.branchId}`;
+            licenseCounts.set(key, (licenseCounts.get(key) ?? 0) + 1);
+        }
+
         const serialsByStock = new Map();
-        for (const s of serials) {
+        const visibleLicenses = scope.isAdmin ? licenses : licenses.filter((l) => l.branchId === scope.branchId);
+        for (const s of [...serials, ...visibleLicenses]) {
             const key = `${s.productId}:${s.branchId}`;
             if (!serialsByStock.has(key)) serialsByStock.set(key, []);
             serialsByStock.get(key).push(s.serialNumber);
         }
 
         const data = {
-            product: rows.map((p) => toProductResponse(p, serialsByStock)),
+            product: rows.map((p) => toProductResponse(p, serialsByStock, licenseCounts)),
             pagination: {
                 total: count,
                 page,
@@ -272,20 +397,33 @@ exports.product = async (req, res) => {
 
 // Adds stock to a branch. Products are matched by name (case-insensitive), so adding an
 // existing product to a branch that already stocks it increases that branch's quantity
-// instead of creating a duplicate record. Serial-tracked products take one serial number per
-// unit instead of a quantity; whether a product is tracked is fixed when it is first added.
+// instead of creating a duplicate record. The product's type is fixed when it is first added:
+//  - Standard: a quantity
+//  - Serialized: one serial number per physical unit (product_serial rows + quantity)
+//  - Software: license keys, added to the branch's license pool; the quantity stays 0
+//  - Service: nothing to stock; the branch now offers the service
 exports.createProduct = async (req, res) => {
     try {
         const scope = req.branchScope;
         // Only admins add products; branch members can still edit and sell their branch's stock
         if (!scope.isAdmin) return sendError(res, "Only an admin can add products", null, 403);
-        const { name, quantity, hasSerialNumber, serialNumbers, branchId: requestedBranchId } = req.body || {};
+        const { name, quantity, hasSerialNumber, serialNumbers, branchId: requestedBranchId, purchase, productType, licenseReassignable } = req.body || {};
+
+        // New products: productType, or (older clients) hasSerialNumber
+        if (productType !== undefined && !PRODUCT_TYPES.includes(productType)) return sendError(res, "Invalid product type", null, 400);
+        const requestedType = productType ?? (hasSerialNumber === true ? PRODUCT_TYPE.SERIALIZED : PRODUCT_TYPE.STANDARD);
+        if (licenseReassignable !== undefined && typeof licenseReassignable !== "boolean") {
+            return sendError(res, "Invalid license reassignment setting", null, 400);
+        }
 
         const parsedName = parseName(name);
         if (parsedName.error) return sendError(res, parsedName.error, null, 400);
 
         const parsedSerials = parseSerialNumbers(serialNumbers);
         if (parsedSerials.error) return sendError(res, parsedSerials.error, null, 400);
+
+        const parsedPurchase = parsePurchase(purchase);
+        if (parsedPurchase.error) return sendError(res, parsedPurchase.error, null, 400);
 
         const resolved = resolveBranchId(scope, requestedBranchId);
         if (resolved.error) return sendError(res, resolved.error, null, resolved.status);
@@ -297,26 +435,46 @@ exports.createProduct = async (req, res) => {
         const result = await sequelize.transaction(async (transaction) => {
             const [product, isNewProduct] = await Product.findOrCreate({
                 where: { name: parsedName.value },
-                defaults: { name: parsedName.value, hasSerialNumber: hasSerialNumber === true },
+                defaults: {
+                    name: parsedName.value,
+                    productType: requestedType,
+                    hasSerialNumber: usesSerialNumbers(requestedType),
+                    licenseReassignable: requestedType === PRODUCT_TYPE.SOFTWARE && licenseReassignable === true,
+                },
                 transaction,
             });
+            // An existing product keeps its own type, but software and physical products are
+            // managed on separate pages, so adding one as the other is refused
+            const type = typeOf(product);
+            if (!isNewProduct && productType !== undefined && (type === PRODUCT_TYPE.SOFTWARE) !== (requestedType === PRODUCT_TYPE.SOFTWARE)) {
+                throw new ProductError(type === PRODUCT_TYPE.SOFTWARE
+                    ? `${product.name} is a software product. Add its licenses from the Software Licenses page.`
+                    : `${product.name} already exists as a ${type === PRODUCT_TYPE.SERVICE ? "service" : "physical"} product. Choose another name for the software.`, 409);
+            }
+            const unitWord = type === PRODUCT_TYPE.SOFTWARE ? "license key" : "serial number";
 
-            let added;
-            if (product.hasSerialNumber) {
+            let added = 0;
+            if (usesSerialNumbers(type)) {
                 if (parsedSerials.value.length === 0) {
                     throw new ProductError(isNewProduct
-                        ? "Enter at least one serial number"
-                        : `${product.name} uses serial numbers. Enter one serial number for each unit.`);
+                        ? `Enter at least one ${unitWord}`
+                        : `${product.name} uses ${unitWord}s. Enter one ${unitWord} for each unit.`);
                 }
                 await assertSerialsFree(parsedSerials.value, transaction);
-                added = parsedSerials.value.length;
             } else {
                 if (parsedSerials.value.length > 0) {
-                    throw new ProductError(`${product.name} doesn't use serial numbers. Enter a quantity instead.`);
+                    throw new ProductError(`${product.name} doesn't use serial numbers.${type === PRODUCT_TYPE.STANDARD ? " Enter a quantity instead." : ""}`);
                 }
+                if (purchase !== undefined && purchase !== null) {
+                    throw new ProductError(`Purchase details are recorded per serial number, and ${product.name} doesn't use serial numbers.`);
+                }
+            }
+            if (type === PRODUCT_TYPE.STANDARD) {
                 const parsedQuantity = parseQuantity(quantity);
                 if (parsedQuantity.error) throw new ProductError(parsedQuantity.error);
                 added = parsedQuantity.value;
+            } else if (type === PRODUCT_TYPE.SERIALIZED) {
+                added = parsedSerials.value.length;
             }
 
             const stock = await ProductStock.findOne({
@@ -328,30 +486,61 @@ exports.createProduct = async (req, res) => {
             const newQuantity = (stock?.quantity ?? 0) + added;
             if (newQuantity > MAX_QUANTITY) throw new ProductError(`Total quantity would exceed ${MAX_QUANTITY.toLocaleString("en-IN")}`);
 
-            if (product.hasSerialNumber) {
-                await ProductSerial.bulkCreate(
-                    parsedSerials.value.map((serialNumber) => ({ productId: product.id, branchId, serialNumber })),
-                    { transaction },
-                );
+            if (usesSerialNumbers(type)) {
+                // Physical units are stock; licenses only join the branch's license pool
+                if (type === PRODUCT_TYPE.SERIALIZED) {
+                    await ProductSerial.bulkCreate(
+                        parsedSerials.value.map((serialNumber) => ({ productId: product.id, branchId, serialNumber })),
+                        { transaction },
+                    );
+                }
+                // The purchase every unit's history links back to
+                const branch = await Branch.findByPk(branchId, { attributes: ["name"], transaction });
+                const purchaseRow = await ProductPurchase.create({
+                    ...parsedPurchase.value,
+                    productId: product.id,
+                    productName: product.name,
+                    branchId,
+                    branchName: branch?.name ?? null,
+                    quantity: parsedSerials.value.length,
+                    source: "Products",
+                    createdBy: req.employee.id,
+                }, { transaction });
+                await registerStock({
+                    serials: parsedSerials.value, productId: product.id, productName: product.name, branchId,
+                    type: EVENT.PURCHASE, purchase: purchaseRow, eventDate: purchaseRow.purchaseDate,
+                    employeeId: req.employee.id, transaction, productType: type,
+                });
+            }
+
+            if (type === PRODUCT_TYPE.SERVICE && stock) {
+                throw new ProductError(`${product.name} is already offered in this branch`, 409);
             }
 
             const saved = stock
                 ? await stock.update({ quantity: newQuantity }, { transaction })
                 : await ProductStock.create({ productId: product.id, branchId, quantity: newQuantity }, { transaction });
-            return { product, stock: saved, merged: !!stock || !isNewProduct, added };
+            return { product, type, stock: saved, merged: !!stock || !isNewProduct, licenses: type === PRODUCT_TYPE.SOFTWARE ? parsedSerials.value.length : 0 };
         });
 
         const data = {
             productId: result.product.id,
             name: result.product.name,
             hasSerialNumber: result.product.hasSerialNumber,
+            productType: result.type,
             branchId,
             quantity: result.stock.quantity,
         };
 
-        return result.merged
-            ? sendSuccess(res, `Stock added to existing product. New quantity: ${result.stock.quantity}`, data, 200)
-            : sendSuccess(res, "Product added successfully", data, 201);
+        let message;
+        if (result.type === PRODUCT_TYPE.SOFTWARE) {
+            message = `${result.licenses} license${result.licenses === 1 ? "" : "s"} added${result.merged ? ` to ${result.product.name}` : ""}`;
+        } else if (result.type === PRODUCT_TYPE.SERVICE) {
+            message = result.merged ? `${result.product.name} is now offered in this branch` : "Service added successfully";
+        } else {
+            message = result.merged ? `Stock added to existing product. New quantity: ${result.stock.quantity}` : "Product added successfully";
+        }
+        return sendSuccess(res, message, data, result.merged ? 200 : 201);
     } catch (error) {
         return sendProductError(res, error);
     }
@@ -367,7 +556,7 @@ exports.updateProduct = async (req, res) => {
         const id = parseId(req.params.id);
         if (!id) return sendError(res, "Invalid product id", null, 400);
 
-        const { name, quantity, serialNumbers, branchId: requestedBranchId } = req.body || {};
+        const { name, quantity, serialNumbers, branchId: requestedBranchId, licenseReassignable } = req.body || {};
 
         const resolved = resolveBranchId(scope, requestedBranchId);
         if (resolved.error) return sendError(res, resolved.error, null, resolved.status);
@@ -376,15 +565,24 @@ exports.updateProduct = async (req, res) => {
         const product = await Product.findByPk(id);
         if (!product) return sendError(res, NOT_FOUND, null, 404);
 
+        const type = typeOf(product);
         let parsedQuantity = null;
         let parsedSerials = null;
-        if (product.hasSerialNumber) {
-            if (!Array.isArray(serialNumbers)) return sendError(res, "Serial numbers are required for this product", null, 400);
+        if (usesSerialNumbers(type)) {
+            if (!Array.isArray(serialNumbers)) {
+                return sendError(res, type === PRODUCT_TYPE.SOFTWARE ? "License keys are required for this product" : "Serial numbers are required for this product", null, 400);
+            }
             parsedSerials = parseSerialNumbers(serialNumbers);
             if (parsedSerials.error) return sendError(res, parsedSerials.error, null, 400);
-        } else {
+        } else if (type === PRODUCT_TYPE.STANDARD) {
             parsedQuantity = parseQuantity(quantity);
             if (parsedQuantity.error) return sendError(res, parsedQuantity.error, null, 400);
+        }
+        // Admins may change whether a software product's returned licenses can be sold again
+        if (licenseReassignable !== undefined) {
+            if (typeof licenseReassignable !== "boolean") return sendError(res, "Invalid license reassignment setting", null, 400);
+            if (type !== PRODUCT_TYPE.SOFTWARE && licenseReassignable) return sendError(res, "Only software licenses can be reassigned", null, 400);
+            if (!scope.isAdmin && licenseReassignable !== product.licenseReassignable) return sendError(res, "Only an admin can change license terms", null, 400);
         }
 
         const stock = await ProductStock.findOne({ where: { productId: id, branchId } });
@@ -408,10 +606,32 @@ exports.updateProduct = async (req, res) => {
         }
 
         const saved = await sequelize.transaction(async (transaction) => {
-            if (newName !== product.name) await product.update({ name: newName }, { transaction });
+            const changes = {};
+            if (newName !== product.name) changes.name = newName;
+            if (scope.isAdmin && type === PRODUCT_TYPE.SOFTWARE && typeof licenseReassignable === "boolean") changes.licenseReassignable = licenseReassignable;
+            if (Object.keys(changes).length > 0) await product.update(changes, { transaction });
 
-            let newQuantity = parsedQuantity?.value;
-            if (product.hasSerialNumber) {
+            // Software and Service products never hold physical stock
+            let newQuantity = parsedQuantity?.value ?? 0;
+            if (type === PRODUCT_TYPE.SOFTWARE) {
+                // The list is the branch's whole license pool: missing keys are taken out, new ones added
+                const current = await SerialUnit.findAll({
+                    where: { productId: id, branchId, status: UNIT_STATUS.AVAILABLE, productType: PRODUCT_TYPE.SOFTWARE },
+                    transaction,
+                    lock: transaction.LOCK.UPDATE,
+                });
+                const wanted = new Set(parsedSerials.value.map((s) => s.toLowerCase()));
+                const kept = new Set(current.map((u) => u.serialNumber.toLowerCase()));
+                const removed = current.filter((u) => !wanted.has(u.serialNumber.toLowerCase())).map((u) => u.serialNumber);
+                const added = parsedSerials.value.filter((s) => !kept.has(s.toLowerCase()));
+                await removeFromStock({ serials: removed, productId: id, productName: newName, branchId, note: "Removed from the license pool in an edit", employeeId: req.employee.id, transaction });
+                await assertSerialsFree(added, transaction);
+                await registerStock({
+                    serials: added, productId: id, productName: newName, branchId,
+                    type: EVENT.STOCK_ADDED, note: "Added to the license pool in an edit", employeeId: req.employee.id, transaction,
+                    productType: PRODUCT_TYPE.SOFTWARE,
+                });
+            } else if (type === PRODUCT_TYPE.SERIALIZED) {
                 const current = await ProductSerial.findAll({ where: { productId: id, branchId }, transaction, lock: transaction.LOCK.UPDATE });
                 const wanted = new Set(parsedSerials.value.map((s) => s.toLowerCase()));
                 const kept = new Set(current.map((s) => s.serialNumber.toLowerCase()));
@@ -421,10 +641,18 @@ exports.updateProduct = async (req, res) => {
 
                 if (removed.length > 0) {
                     await ProductSerial.destroy({ where: { id: removed.map((s) => s.id) }, transaction });
+                    await removeFromStock({
+                        serials: removed.map((s) => s.serialNumber), productId: id, productName: newName, branchId,
+                        note: "Removed in a stock edit", employeeId: req.employee.id, transaction,
+                    });
                 }
                 await assertSerialsFree(added, transaction);
                 if (added.length > 0) {
                     await ProductSerial.bulkCreate(added.map((serialNumber) => ({ productId: id, branchId, serialNumber })), { transaction });
+                    await registerStock({
+                        serials: added, productId: id, productName: newName, branchId,
+                        type: EVENT.STOCK_ADDED, note: "Added in a stock edit", employeeId: req.employee.id, transaction,
+                    });
                 }
                 newQuantity = parsedSerials.value.length;
             }
@@ -433,7 +661,7 @@ exports.updateProduct = async (req, res) => {
             return ProductStock.create({ productId: id, branchId, quantity: newQuantity }, { transaction });
         });
 
-        const data = { productId: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, branchId, quantity: saved.quantity };
+        const data = { productId: product.id, name: product.name, hasSerialNumber: product.hasSerialNumber, productType: type, branchId, quantity: saved.quantity };
         return sendSuccess(res, "Product updated successfully", data, 200);
     } catch (error) {
         return sendProductError(res, error);
@@ -442,7 +670,7 @@ exports.updateProduct = async (req, res) => {
 
 // Hard delete. With ?branchId only that branch's stock is removed; admins can omit it to
 // delete the product from every branch. Branch members can only remove their own branch's stock.
-// In-stock serial numbers go with the stock; sold ones stay on their sales.
+// In-stock serial numbers go with the stock (their history records the removal); sold ones stay on their sales.
 exports.deleteProduct = async (req, res) => {
     try {
         const scope = req.branchScope;
@@ -464,6 +692,7 @@ exports.deleteProduct = async (req, res) => {
 
         if (deleteEverywhere) {
             await sequelize.transaction(async (transaction) => {
+                await recordSerialsRemoved({ productId: id, productName: product.name, employeeId: req.employee.id, transaction });
                 await ProductSerial.destroy({ where: { productId: id }, transaction });
                 await ProductStock.destroy({ where: { productId: id }, transaction });
                 await product.destroy({ transaction });
@@ -477,6 +706,7 @@ exports.deleteProduct = async (req, res) => {
         }
 
         await sequelize.transaction(async (transaction) => {
+            await recordSerialsRemoved({ productId: id, productName: product.name, branchId, employeeId: req.employee.id, transaction });
             await ProductSerial.destroy({ where: { productId: id, branchId }, transaction });
             await stock.destroy({ transaction });
             await removeIfOrphaned(id, transaction);

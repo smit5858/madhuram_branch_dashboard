@@ -2,7 +2,8 @@ import { Formik, Form, Field, useFormikContext } from "formik";
 import { useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { CircleAlert, Plus, RotateCcw } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { CircleAlert, Lock, Pencil, Plus, RotateCcw, Trash2, Undo2 } from "lucide-react";
 import { parse } from "date-fns";
 import toast from "react-hot-toast";
 import type { AxiosResponse } from "axios";
@@ -21,6 +22,10 @@ import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
 import { DateToDateStringWithMonth } from "@/util/DateFormate";
 import { formatPhone } from "@/util/CommonFunction";
+import SerialLink from "@/components/SerialHistory/SerialLink";
+import { useSerialHistory } from "@/components/SerialHistory/SerialHistoryContext";
+import RecordReturnDialog, { type ReturnTarget } from "@/components/SerialHistory/RecordReturnDialog";
+import { unitShares } from "@/components/SerialHistory/serialDisplay";
 import AddSaleForm from "./AddSaleForm";
 import SalesSummary from "./SalesSummary";
 
@@ -58,11 +63,11 @@ const SaleFilterWatcher = ({ onChange }: { onChange: (filters: SaleFilterValues)
     return null;
 };
 
-const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues) => void; onAdd: () => void }) => {
+const SaleFilters = ({ initialValues, onChange, onAdd }: { initialValues: SaleFilterValues; onChange: (filters: SaleFilterValues) => void; onAdd: () => void }) => {
     const today = useMemo(() => new Date(), []);
 
     return (
-        <Formik initialValues={emptyFilters} validationSchema={productFilterSchema} onSubmit={() => undefined}>
+        <Formik initialValues={initialValues} validationSchema={productFilterSchema} onSubmit={() => undefined}>
             {({ values, resetForm }) => (
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <Form className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start" noValidate>
@@ -71,7 +76,7 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
                             <Field
                                 id="search"
                                 name="search"
-                                placeholder="Search customer, phone, company, product or serial no..."
+                                placeholder="Search customer, phone, product, serial no. or SALE-..."
                                 component={Input}
                             />
                         </div>
@@ -94,7 +99,7 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
                             />
                         </div>
                         <Button
-                            onClick={() => resetForm()}
+                            onClick={() => resetForm({ values: emptyFilters })}
                             className="sm:w-auto bg-gray-100! text-gray-700! hover:bg-gray-200! focus-visible:ring-gray-400!"
                         >
                             <RotateCcw className="size-4" />
@@ -111,8 +116,34 @@ const SaleFilters = ({ onChange, onAdd }: { onChange: (filters: SaleFilterValues
     );
 };
 
+const SERIALS_SHOWN = 3;
+
+const ActionButton = ({ label, icon: Icon, className, onClick, disabled }: {
+    label: string; icon: typeof Pencil; className: string; onClick: () => void; disabled?: boolean;
+}) => (
+    <button
+        type="button"
+        title={label}
+        aria-label={label}
+        disabled={disabled}
+        onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+        }}
+        className={`inline-flex size-8 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${className}`}
+    >
+        <Icon className="size-4" />
+    </button>
+);
+
+interface SaleActions {
+    onEdit: (sale: ISaleModel) => void;
+    onDelete: (sale: ISaleModel) => void;
+    onReturn: (sale: ISaleModel) => void;
+}
+
 // Admins also get a Branch column so each sale's branch is visible
-const buildColumns = (isAdmin: boolean): TableColumn<ISaleModel>[] => [
+const buildColumns = (isAdmin: boolean, actions: SaleActions): TableColumn<ISaleModel>[] => [
     // Running number (1, 2, 3 ... continuing across pages), not the database id
     { id: "srNo", label: "Sr no.", width: 80, renderCell: (_value, _row, _column, _rowIndex, serialNo) => serialNo },
     {
@@ -138,12 +169,21 @@ const buildColumns = (isAdmin: boolean): TableColumn<ISaleModel>[] => [
                 <span>
                     {name}
                     {row.quantity > 1 && <span className="ml-1.5 text-xs text-slate-500">× {row.quantity.toLocaleString("en-IN")}</span>}
+                    {row.saleType === "Renewal" && <span className="ml-1.5 rounded-md bg-violet-100 px-1.5 py-0.5 text-[11px] font-medium text-violet-700">License renewal</span>}
+                    {row.saleType !== "Renewal" && row.productType === "Software" && <span className="ml-1.5 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium text-violet-700">License</span>}
+                    {row.productType === "Service" && <span className="ml-1.5 rounded-md bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700">Service</span>}
                 </span>
                 {row.serialNumbers.length > 0 && (
-                    <span className="text-xs text-slate-500" title={row.serialNumbers.join(", ")}>
-                        SN: {row.serialNumbers.length > 3
-                            ? `${row.serialNumbers.slice(0, 3).join(", ")} +${row.serialNumbers.length - 3} more`
-                            : row.serialNumbers.join(", ")}
+                    // Each serial number opens its full history
+                    <span className="flex flex-wrap items-center gap-1" title={row.serialNumbers.join(", ")}>
+                        {row.serialNumbers.slice(0, SERIALS_SHOWN).map((sn) => <SerialLink key={sn} serialNumber={sn} variant="chip" />)}
+                        {row.serialNumbers.length > SERIALS_SHOWN && <span className="text-xs text-slate-400">+{row.serialNumbers.length - SERIALS_SHOWN} more</span>}
+                    </span>
+                )}
+                {row.returns.length > 0 && (
+                    <span className="text-xs font-medium text-amber-700">
+                        {row.returns.length} return{row.returns.length === 1 ? "" : "s"} recorded
+                        {row.returns.some((r) => r.status === "Pending") && " · pending decision"}
                     </span>
                 )}
             </div>
@@ -159,16 +199,72 @@ const buildColumns = (isAdmin: boolean): TableColumn<ISaleModel>[] => [
         sortable: true,
         renderCell: (amount: number) => <span className="font-medium tabular-nums text-slate-800">{currency.format(amount)}</span>,
     },
-    { id: "actions", label: "Action", width: 100 },
+    {
+        id: "actions",
+        label: "Action",
+        align: "right",
+        hideable: false,
+        renderCell: (_value, row) => {
+            // A sale with a recorded return is part of that unit's history and can't change
+            const locked = row.returns.length > 0;
+            // A renewal can only be cancelled (deleted); it is never edited
+            if (row.saleType === "Renewal") {
+                return (
+                    <div className="inline-flex items-center gap-1">
+                        <ActionButton label="Cancel renewal" icon={Trash2} onClick={() => actions.onDelete(row)} className="text-red-500 hover:bg-red-50 hover:text-red-600" />
+                    </div>
+                );
+            }
+            return (
+                <div className="inline-flex items-center gap-1">
+                    {row.returnableSerials.length > 0 && (
+                        <ActionButton label="Record return" icon={Undo2} onClick={() => actions.onReturn(row)} className="text-amber-600 hover:bg-amber-50 hover:text-amber-700" />
+                    )}
+                    {locked ? (
+                        <span title="This sale has a recorded return, so it can't be edited or deleted. Its history stays with the serial number." className="inline-flex size-8 items-center justify-center text-slate-300">
+                            <Lock className="size-4" />
+                        </span>
+                    ) : (
+                        <>
+                            <ActionButton label="Edit" icon={Pencil} onClick={() => actions.onEdit(row)} className="text-blue-500 hover:bg-blue-50 hover:text-blue-600" />
+                            <ActionButton label="Delete" icon={Trash2} onClick={() => actions.onDelete(row)} className="text-red-500 hover:bg-red-50 hover:text-red-600" />
+                        </>
+                    )}
+                </div>
+            );
+        },
+    },
 ];
+
+// The sale's still-returnable units, each with its share of the selling amount
+const toReturnTarget = (sale: ISaleModel): ReturnTarget => {
+    const shares = unitShares(sale.sellingAmount, sale.serialNumbers.length);
+    return {
+        saleId: sale.id,
+        saleReference: sale.reference,
+        customerName: sale.customerName,
+        saleDate: sale.saleDate,
+        branchId: sale.branchId,
+        branchName: sale.branchName,
+        units: sale.returnableSerials.map((sn) => {
+            const index = sale.serialNumbers.findIndex((x) => x.toLowerCase() === sn.toLowerCase());
+            return { serialNumber: sn, amount: index === -1 ? null : shares[index] };
+        }),
+    };
+};
 
 const Sales = () => {
     const userId = useSelector((state: RootState) => state.auth.userId);
+    const { changeCount } = useSerialHistory();
+    // ?search= (e.g. SALE-00012) opens the list filtered, used by serial number histories
+    const [searchParams] = useSearchParams();
+    const initialFilters = useMemo<SaleFilterValues>(() => ({ ...emptyFilters, search: searchParams.get("search") ?? "" }), [searchParams]);
 
-    const [filters, setFilters] = useState<SaleFilterValues>(emptyFilters);
+    const [filters, setFilters] = useState<SaleFilterValues>(initialFilters);
     // sale is null when adding, set when editing
     const [form, setForm] = useState<{ open: boolean; sale: ISaleModel | null }>({ open: false, sale: null });
     const [saleToDelete, setSaleToDelete] = useState<ISaleModel | null>(null);
+    const [returnTarget, setReturnTarget] = useState<ReturnTarget | null>(null);
     // Bumped after a sale is saved or deleted so the table reloads
     const [refreshKey, setRefreshKey] = useState(0);
     const reloadTable = () => setRefreshKey((key) => key + 1);
@@ -201,7 +297,11 @@ const Sales = () => {
         },
     });
 
-    const columns = useMemo(() => buildColumns(!!scope?.isAdmin), [scope?.isAdmin]);
+    const columns = useMemo(() => buildColumns(!!scope?.isAdmin, {
+        onEdit: (sale) => setForm({ open: true, sale }),
+        onDelete: setSaleToDelete,
+        onReturn: (sale) => setReturnTarget(toReturnTarget(sale)),
+    }), [scope?.isAdmin]);
     const ownBranchName = scope && !scope.isAdmin ? scope.branch[0]?.name : null;
 
     if (isScopeLoading) {
@@ -234,9 +334,9 @@ const Sales = () => {
 
     return (
         <div className="p-6 bg-white rounded-xl shadow-md flex flex-col gap-6">
-            <SalesSummary isAdmin={scope.isAdmin} filters={filters} refreshKey={refreshKey} />
+            <SalesSummary isAdmin={scope.isAdmin} filters={filters} refreshKey={refreshKey + changeCount} />
 
-            <SaleFilters onChange={setFilters} onAdd={() => setForm({ open: true, sale: null })} />
+            <SaleFilters key={initialFilters.search} initialValues={initialFilters} onChange={setFilters} onAdd={() => setForm({ open: true, sale: null })} />
 
             <p className="-mt-3 text-xs text-slate-500">
                 {scope.isAdmin
@@ -256,12 +356,15 @@ const Sales = () => {
                     endDate: filters.endDate || undefined,
                 })}
                 mapResponseToColumns={mapResponseToColumns}
-                refreshKey={refreshKey}
+                refreshKey={refreshKey + changeCount}
                 emptyMessage={filters.search || filters.startDate || filters.endDate ? "No sales match your filters" : "No sales found"}
-                isEdit
-                onEdit={(sale) => setForm({ open: true, sale })}
-                isDelete
-                onDelete={setSaleToDelete}
+            />
+
+            <RecordReturnDialog
+                open={!!returnTarget}
+                target={returnTarget}
+                onClose={() => setReturnTarget(null)}
+                onSaved={reloadTable}
             />
 
             <AddSaleForm
@@ -277,13 +380,23 @@ const Sales = () => {
                 onClose={() => setSaleToDelete(null)}
                 onConfirm={() => saleToDelete && removeSale(saleToDelete.id)}
                 loading={isDeleting}
-                title="Delete Sale"
-                message={
+                title={saleToDelete?.saleType === "Renewal" ? "Cancel Renewal" : "Delete Sale"}
+                confirmLabel={saleToDelete?.saleType === "Renewal" ? "Cancel Renewal" : "Delete"}
+                message={saleToDelete?.saleType === "Renewal" ? (
+                    <>
+                        Cancel the renewal of <span className="font-semibold text-gray-900">{saleToDelete.serialNumbers[0]}</span> for <span className="font-semibold text-gray-900">{saleToDelete.customerName}</span>? The renewal sale is removed, the license's previous expiry date comes back, and the license history keeps both the renewal and its cancellation.
+                    </>
+                ) : (
                     <>
                         Are you sure you want to permanently delete the sale of <span className="font-semibold text-gray-900">{saleToDelete?.productName}</span> to <span className="font-semibold text-gray-900">{saleToDelete?.customerName}</span>
-                        {scope.isAdmin && saleToDelete?.branchName ? <> ({saleToDelete.branchName})</> : null}? The sold quantity will be returned to the branch's stock. This cannot be undone.
+                        {scope.isAdmin && saleToDelete?.branchName ? <> ({saleToDelete.branchName})</> : null}?{" "}
+                        {saleToDelete?.productType === "Software"
+                            ? "The licenses go back into the branch's license pool."
+                            : saleToDelete?.productType === "Service"
+                                ? "Its installation IDs are cancelled (kept in their history)."
+                                : "The sold quantity will be returned to the branch's stock."} This cannot be undone.
                     </>
-                }
+                )}
             />
         </div>
     );

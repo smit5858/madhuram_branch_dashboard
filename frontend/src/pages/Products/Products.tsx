@@ -17,6 +17,15 @@ import { useDebounce } from "@/hook/useDebounce";
 import { isCompleteDate, productFilterSchema } from "@/validation/validation";
 import CustomTable, { type TableColumn } from "@/components/CustomTable";
 import { DateToDateStringWithMonth } from "@/util/DateFormate";
+import SerialLink from "@/components/SerialHistory/SerialLink";
+import { useSerialHistory } from "@/components/SerialHistory/SerialHistoryContext";
+import { PRODUCT_TYPE_LABEL } from "@/components/SerialHistory/serialDisplay";
+
+const TYPE_TAG: Record<string, string> = {
+    Serialized: "bg-slate-100 text-slate-600",
+    Software: "bg-violet-100 text-violet-700",
+    Service: "bg-sky-100 text-sky-700",
+};
 import AddProductForm from "./AddProductForm";
 import DeleteProductDialog from "./DeleteProductDialog";
 
@@ -115,7 +124,7 @@ const SerialNumbersCell = ({ product, search }: { product: IProductModel; search
     if (!product.hasSerialNumber) return <span className="text-slate-300">—</span>;
 
     const all = product.stocks.flatMap((s) => s.serialNumbers);
-    if (all.length === 0) return <span className="text-xs text-slate-400">None in stock</span>;
+    if (all.length === 0) return <span className="text-xs text-slate-400">{product.productType === "Software" ? "No licenses available" : "None in stock"}</span>;
 
     const term = search.toLowerCase();
     const matches = term ? all.filter((sn) => sn.toLowerCase().includes(term)) : [];
@@ -124,16 +133,8 @@ const SerialNumbersCell = ({ product, search }: { product: IProductModel; search
 
     return (
         <div className="flex flex-wrap items-center gap-1" title={all.join(", ")}>
-            {shown.map((sn) => (
-                <span
-                    key={sn}
-                    className={matches.includes(sn)
-                        ? "rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
-                        : "rounded-md bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600"}
-                >
-                    {sn}
-                </span>
-            ))}
+            {/* Each serial number opens its full history */}
+            {shown.map((sn) => <SerialLink key={sn} serialNumber={sn} variant="chip" highlight={matches.includes(sn)} />)}
             {all.length > SERIALS_SHOWN && <span className="text-xs text-slate-400">+{all.length - SERIALS_SHOWN} more</span>}
         </div>
     );
@@ -144,10 +145,23 @@ const buildColumns = (scope: IProductBranchScopeModel, search: string): TableCol
     // Running number (1, 2, 3 ... continuing across pages), not the database id
     { id: "srNo", label: "Sr no.", width: 80, renderCell: (_value, _row, _column, _rowIndex, serialNo) => serialNo },
     // Capped so the spare width goes to the branch columns instead of a long empty Name column
-    { id: "name", label: "Name", sortable: true, width: "30%", className: "min-w-48" },
+    {
+        id: "name", label: "Name", sortable: true, width: "30%", className: "min-w-48",
+        renderCell: (name: string, row) => (
+            <div className="flex flex-col items-start gap-0.5">
+                <span>{name}</span>
+                {row.productType !== "Standard" && (
+                    <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${TYPE_TAG[row.productType] ?? ""}`}>
+                        {PRODUCT_TYPE_LABEL[row.productType]}
+                        {row.productType === "Software" && (row.licenseReassignable ? " · reassignable" : " · single-use")}
+                    </span>
+                )}
+            </div>
+        ),
+    },
     {
         id: "serialNumbers",
-        label: "Serial Numbers",
+        label: "Serial Numbers / Licenses",
         className: "min-w-40",
         accessor: (row) => row.hasSerialNumber,
         renderCell: (_value, row) => <SerialNumbersCell product={row} search={search} />,
@@ -157,10 +171,28 @@ const buildColumns = (scope: IProductBranchScopeModel, search: string): TableCol
         label: branch.isActive ? branch.name : `${branch.name} (Inactive)`,
         align: "center",
         sortable: true,
-        accessor: (row) => row.stocks.find((s) => s.branchId === branch.id)?.quantity ?? null,
+        // Software shows its license pool (it never holds physical stock); services have nothing to count
+        accessor: (row) => {
+            const stock = row.stocks.find((s) => s.branchId === branch.id);
+            if (!stock) return null;
+            return row.productType === "Software" ? stock.licenseCount ?? 0 : row.productType === "Service" ? -1 : stock.quantity;
+        },
         renderCell: (quantity: number | null, row) => {
             if (quantity === null) return <span className="text-slate-300" title={`No stock in ${branch.name}`}>—</span>;
             const stock = row.stocks.find((s) => s.branchId === branch.id);
+            if (row.productType === "Service") {
+                return <span className="text-xs font-medium text-sky-700" title={`${branch.name} offers this service`}>Offered</span>;
+            }
+            if (row.productType === "Software") {
+                return (
+                    <span
+                        title={`${branch.name}: ${quantity} license${quantity === 1 ? "" : "s"} available (not physical stock)${stock?.serialNumbers.length ? `\n${stock.serialNumbers.join(", ")}` : ""}`}
+                        className={quantity === 0 ? "text-xs font-medium text-red-500" : "text-xs font-medium tabular-nums text-violet-700"}
+                    >
+                        {quantity.toLocaleString("en-IN")} lic.
+                    </span>
+                );
+            }
             return (
                 <span
                     title={`${branch.name} · updated ${formatDate(stock?.updatedAt)}${stock?.serialNumbers.length ? `\nSerial numbers: ${stock.serialNumbers.join(", ")}` : ""}`}
@@ -177,6 +209,8 @@ const buildColumns = (scope: IProductBranchScopeModel, search: string): TableCol
 
 const Products = () => {
     const userId = useSelector((state: RootState) => state.auth.userId);
+    // A transfer or return saved from a serial number's history changes stock counts
+    const { changeCount } = useSerialHistory();
 
     const [filters, setFilters] = useState<ProductFilterValues>(emptyFilters);
     // product is null when adding, set when editing
@@ -243,7 +277,7 @@ const Products = () => {
 
             <p className="-mt-3 text-xs text-slate-500">
                 {scope.isAdmin
-                    ? "Stock quantity is shown separately for each branch."
+                    ? "Stock quantity is shown separately for each branch. Services have no stock. Software licenses are managed on the Software Licenses page."
                     : <>Stock is shown for every branch. You can only change stock in your branch: <span className="font-semibold text-slate-700">{ownBranchName}</span></>}
             </p>
 
@@ -251,7 +285,9 @@ const Products = () => {
             <CustomTable<IProductModel>
                 column={columns}
                 queryKey={`products:${userId}:${JSON.stringify(filters)}`}
+                // Software licenses have their own page
                 row={(page: number, limit: number) => productService.product({
+                    productTypes: "Standard,Serialized,Service",
                     page,
                     pageSize: limit,
                     search: filters.search || undefined,
@@ -259,7 +295,7 @@ const Products = () => {
                     endDate: filters.endDate || undefined,
                 })}
                 mapResponseToColumns={mapResponseToColumns}
-                refreshKey={refreshKey}
+                refreshKey={refreshKey + changeCount}
                 emptyMessage={filters.search || filters.startDate || filters.endDate ? "No products match your filters" : "No products found"}
                 isEdit
                 onEdit={(product) => canChange(product) && setForm({ open: true, product })}

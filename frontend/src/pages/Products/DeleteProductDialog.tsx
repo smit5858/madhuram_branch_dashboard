@@ -20,6 +20,7 @@ interface DeleteProductDialogProps {
 // Admins choose one branch's stock or the whole product.
 const DeleteProductDialog = ({ product, scope, onClose, onDeleted }: DeleteProductDialogProps) => {
     const { isAdmin } = scope;
+    const isSoftware = product?.productType === "Software";
     const stocks = useMemo(
         () => (product?.stocks ?? []).filter((s) => isAdmin || s.branchId === scope.branchId),
         [product, isAdmin, scope.branchId],
@@ -61,7 +62,7 @@ const DeleteProductDialog = ({ product, scope, onClose, onDeleted }: DeleteProdu
     };
 
     return (
-        <Dialog open={!!product} onClose={onClose} title="Delete Product Stock" preventClose={isPending} className="max-w-md">
+        <Dialog open={!!product} onClose={onClose} title={isSoftware ? "Remove Software" : "Delete Product Stock"} preventClose={isPending} className="max-w-md">
             {isAdmin && options.length > 1 && (
                 <Select
                     name="deleteBranch"
@@ -75,11 +76,11 @@ const DeleteProductDialog = ({ product, scope, onClose, onDeleted }: DeleteProdu
             <p className="text-sm text-gray-600">
                 {deleteAll ? (
                     <>
-                        Are you sure you want to permanently delete <span className="font-semibold text-gray-900">{product?.name}</span> and its stock in <span className="font-semibold text-gray-900">every branch</span>? This cannot be undone.
+                        Are you sure you want to permanently delete <span className="font-semibold text-gray-900">{product?.name}</span> and its {isSoftware ? "available licenses" : "stock"} in <span className="font-semibold text-gray-900">every branch</span>?{isSoftware ? " Sold licenses keep their history." : ""} This cannot be undone.
                     </>
                 ) : (
                     <>
-                        Are you sure you want to permanently delete the stock of <span className="font-semibold text-gray-900">{product?.name}</span> in <span className="font-semibold text-gray-900">{selectedStock?.branchName ?? "this branch"}</span>? Other branches are not affected. This cannot be undone.
+                        Are you sure you want to permanently delete the {isSoftware ? "available licenses" : "stock"} of <span className="font-semibold text-gray-900">{product?.name}</span> in <span className="font-semibold text-gray-900">{selectedStock?.branchName ?? "this branch"}</span>? Other branches are not affected.{isSoftware ? " Sold licenses keep their history." : ""} This cannot be undone.
                     </>
                 )}
             </p>

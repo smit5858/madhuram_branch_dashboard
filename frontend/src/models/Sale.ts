@@ -1,4 +1,6 @@
 import type { ICustomerModel } from "./Customer";
+import type { ISaleReturnBriefModel } from "./SaleReturn";
+import type { ProductType } from "./Product";
 
 export interface ISaleRequestModel {
     page: number;
@@ -12,6 +14,12 @@ export interface ISaleRequestModel {
 
 export interface ISaleModel {
     id: number;
+    /** SALE-00001, the reference shown in serial number histories */
+    reference: string;
+    /** "Renewal" sales are software license renewals: they can be deleted (cancelling the renewal), not edited */
+    saleType: "Sale" | "Renewal";
+    /** null for "Other" and for products removed from the catalogue */
+    productType: ProductType | null;
     /** Linked customer; null for older sales and sales whose customer was deleted */
     customerId: number | null;
     /** The linked customer's current name, or the name saved on the sale */
@@ -33,6 +41,10 @@ export interface ISaleModel {
     branchName: string | null;
     createdAt: string;
     updatedAt: string;
+    /** Returns recorded against this sale; any return locks it against edits and deletion */
+    returns: ISaleReturnBriefModel[];
+    /** Serial numbers of this sale still with the customer, which can be returned */
+    returnableSerials: string[];
 }
 
 /** Optional details saved when the sale creates a new customer */
@@ -95,9 +107,11 @@ export interface ISaleProductModel {
     id: number;
     name: string;
     hasSerialNumber: boolean;
-    /** In-stock serial numbers in this branch */
+    productType: ProductType;
+    /** In-stock serial numbers in this branch (Software: license keys in the branch's pool) */
     serialNumbers: string[];
-    quantity: number;
+    /** Units that can be sold: stock, or licenses in the pool; null for services (no limit) */
+    quantity: number | null;
 }
 
 export interface ISaleProductResponseModel {
@@ -108,8 +122,14 @@ export interface ISaleProductResponseModel {
 /** Totals for the same search and date filters as the sales list */
 export interface ISaleSummaryModel {
     /** Branch members get only their own branch; admins get every branch */
-    branch: { branchId: number; branchName: string; total: number }[];
+    branch: { branchId: number; branchName: string; total: number; refunds: number; net: number }[];
     total: number;
+    /** Refunds of these sales' returns (rejected returns don't count) */
+    refunds: number;
+    /** total − refunds */
+    net: number;
+    /** Revenue by product type ("Standard", "Serialized", "Software", "Service", "Renewal", "Other") */
+    byType: { productType: string; total: number }[];
 }
 
 export interface ISaleResponseModel {

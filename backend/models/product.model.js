@@ -21,6 +21,20 @@ const Product = sequelize.define(
             allowNull: false,
             defaultValue: false,
         },
+        // Standard, Serialized, Software or Service (helper/productType.js). Fixed when the
+        // product is first added; hasSerialNumber is true for Serialized and Software.
+        productType: {
+            type: DataTypes.STRING(30),
+            allowNull: false,
+            defaultValue: "Standard",
+        },
+        // Software only: a returned license may go back into the pool and be sold again.
+        // Off by default, so a single-use license is never reassigned unless allowed.
+        licenseReassignable: {
+            type: DataTypes.BOOLEAN,
+            allowNull: false,
+            defaultValue: false,
+        },
     },
     {
         tableName: "product",

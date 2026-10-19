@@ -6,8 +6,10 @@ const { LedgerError, parseId, isSent, parseAmount, parseEntryDate, parseDescript
 const { findExistingSerials } = require("@/controllers/product.controller");
 const {
     Branch, Employee, Product, ProductStock, ProductSerial,
-    RajkotExpense, RajkotExpenseItem, RajkotExpenseSerial, RajkotExpenseCounter,
+    RajkotExpense, RajkotExpenseItem, RajkotExpenseSerial, RajkotExpenseCounter, ProductPurchase,
 } = require("@/models/index");
+const { EVENT, allocateAmount, rajkotReference, registerStock } = require("@/helper/serialHistory");
+const { PRODUCT_TYPE, typeOf } = require("@/helper/productType");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
@@ -160,6 +162,8 @@ const checkItems = async (branchId, items, transaction) => {
     const checked = items.map((item, index) => {
         const product = productById.get(item.productId);
         if (!product) throw new RajkotExpenseError(`Row ${index + 1}: the selected product no longer exists`);
+        // Services have nothing to buy; software licenses come in like serialized units (license keys)
+        if (typeOf(product) === PRODUCT_TYPE.SERVICE) throw new RajkotExpenseError(`${product.name} is an installation service and can't be added to a Rajkot Expense`);
         let quantity;
         if (product.hasSerialNumber) {
             if (item.serialNumbers.length === 0) throw new RajkotExpenseError(`Enter the serial numbers of ${product.name}`);
@@ -259,7 +263,9 @@ exports.products = async (req, res) => {
         if (!branchId) return sendError(res, isSent(req.query.branchId) ? "Invalid branch" : "Branch is required", null, 400);
 
         const products = await Product.findAll({
-            attributes: ["id", "name", "hasSerialNumber"],
+            // Installation services have no stock to buy
+            where: { productType: { [Op.ne]: PRODUCT_TYPE.SERVICE } },
+            attributes: ["id", "name", "hasSerialNumber", "productType"],
             include: [{ model: ProductStock, as: "stocks", where: { branchId }, attributes: ["quantity"], required: false }],
             order: [["name", "ASC"]],
         });
@@ -270,6 +276,7 @@ exports.products = async (req, res) => {
                 id: p.id,
                 name: p.name,
                 hasSerialNumber: p.hasSerialNumber,
+                productType: typeOf(p),
                 quantity: p.stocks?.[0]?.quantity ?? 0,
             })),
         };
@@ -483,7 +490,8 @@ exports.create = async (req, res) => {
 // adds stock: plain products gain their quantity, serialized products gain one product_serial
 // row per serial number (and the matching quantity). A missing stock row is created. Any
 // problem throws, so the whole accept rolls back and nothing is applied partly.
-const addEntryToStock = async (entry, transaction) => {
+// Serialized units are also recorded as a purchase in their serial number history.
+const addEntryToStock = async (entry, employeeId, transaction) => {
     const items = await RajkotExpenseItem.findAll({
         where: { rajkotExpenseId: entry.id },
         include: [{ model: RajkotExpenseSerial, as: "serials", attributes: ["serialNumber"], required: false }],
@@ -504,11 +512,39 @@ const addEntryToStock = async (entry, transaction) => {
             // Checked again: a serial number may have been added through Products since the entry was saved
             const existing = await findExistingSerials(serials, transaction);
             if (existing.length > 0) throw new RajkotExpenseError(`Serial number already exists: ${listForMessage(existing)}`, 409);
-            await ProductSerial.bulkCreate(serials.map((serialNumber) => ({ productId: product.id, branchId: entry.branchId, serialNumber })), { transaction });
+            // Licenses only join the branch's license pool; physical units become stock
+            const isLicense = typeOf(product) === PRODUCT_TYPE.SOFTWARE;
+            if (!isLicense) await ProductSerial.bulkCreate(serials.map((serialNumber) => ({ productId: product.id, branchId: entry.branchId, serialNumber })), { transaction });
+
+            // The units' purchase: from Rajkot, at the row's amount split across its units
+            const branch = await Branch.findByPk(entry.branchId, { attributes: ["name"], transaction });
+            const unitAmounts = allocateAmount(item.amount, serials.length);
+            const purchase = await ProductPurchase.create({
+                productId: product.id,
+                productName: product.name,
+                branchId: entry.branchId,
+                branchName: branch?.name ?? null,
+                supplierName: "Rajkot Expense",
+                purchaseDate: entry.entryDate,
+                unitAmount: unitAmounts[0],
+                quantity: serials.length,
+                reference: rajkotReference(entry.id),
+                source: "Rajkot Expense",
+                rajkotExpenseId: entry.id,
+                createdBy: entry.createdBy,
+            }, { transaction });
+            await registerStock({
+                serials, productId: product.id, productName: product.name, branchId: entry.branchId,
+                type: EVENT.PURCHASE, purchase, unitAmounts, eventDate: entry.entryDate,
+                note: `Accepted Rajkot Expense ${rajkotReference(entry.id)}`, employeeId, transaction,
+                productType: isLicense ? PRODUCT_TYPE.SOFTWARE : PRODUCT_TYPE.SERIALIZED,
+            });
         }
 
         const stock = await ProductStock.findOne({ where: { productId: product.id, branchId: entry.branchId }, transaction, lock: transaction.LOCK.UPDATE });
-        const quantity = (stock?.quantity ?? 0) + item.quantity;
+        // Software keeps a quantity of 0: its licenses are tracked by serial number, not as stock
+        const added = typeOf(product) === PRODUCT_TYPE.SOFTWARE ? 0 : item.quantity;
+        const quantity = (stock?.quantity ?? 0) + added;
         if (quantity > MAX_QUANTITY) throw new RajkotExpenseError(`Stock of ${product.name} would exceed ${MAX_QUANTITY.toLocaleString("en-IN")}`);
         if (stock) await stock.update({ quantity }, { transaction });
         else await ProductStock.create({ productId: product.id, branchId: entry.branchId, quantity }, { transaction });
@@ -541,7 +577,7 @@ exports.accept = async (req, res) => {
             const counter = await RajkotExpenseCounter.findByPk(entry.branchId, { transaction, lock: transaction.LOCK.UPDATE });
             if (!counter) throw new RajkotExpenseError("Could not load this branch's expense count. Please try again.", 500);
 
-            await addEntryToStock(entry, transaction);
+            await addEntryToStock(entry, req.employee.id, transaction);
 
             const count = counter.count + 1;
             const balance = (paise(counter.balance) + paise(entry.totalAmount)) / 100;

@@ -1,17 +1,34 @@
 import { Field, Form, Formik, useFormikContext } from "formik";
 import { useEffect, useMemo, useRef } from "react";
+import { format } from "date-fns";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { Input } from "@/components/formik-fields/Input";
 import { Textarea } from "@/components/formik-fields/Textarea";
 import { Switch } from "@/components/formik-fields/Switch";
 import { Select, type SelectOption } from "@/components/formik-fields/Select";
+import { DatePicker, DATE_VALUE_FORMAT } from "@/components/formik-fields/DatePicker";
 import { Button } from "@/components/Button";
 import { Dialog } from "@/components/Dialog";
 import productService from "@/services/product-service";
 import { useDebounce } from "@/hook/useDebounce";
-import { productSchema, splitSerialNumbers } from "@/validation/validation";
-import type { IProductBranchScopeModel, IProductCreateModel, IProductFormValues, IProductModel } from "@/models/Product";
+import { productSchema, purchaseDetailsSchema, splitSerialNumbers } from "@/validation/validation";
+import type { IProductBranchScopeModel, IProductCreateModel, IProductFormValues, IProductModel, ProductType } from "@/models/Product";
+import { PRODUCT_TYPE_LABEL } from "@/components/SerialHistory/serialDisplay";
+
+// Serialized products take one serial number per physical unit, software one key per license
+const usesSerials = (type: ProductType) => type === "Serialized" || type === "Software";
+
+// Software has its own page (Software Licenses), so the Products form offers the other types
+const TYPE_OPTIONS: SelectOption[] = (["Standard", "Serialized", "Service"] as ProductType[])
+    .map((t) => ({ value: t, label: PRODUCT_TYPE_LABEL[t] }));
+
+const TYPE_HINT: Record<ProductType, string> = {
+    Standard: "Stock is a plain quantity.",
+    Serialized: "Physical stock; each unit has its own serial number.",
+    Software: "Each license key is tracked on its own. No physical stock: licenses sell even when the quantity is 0.",
+    Service: "Nothing to stock. Each unit sold gets an installation ID for its history.",
+};
 
 interface AddProductFormProps {
     open: boolean;
@@ -21,7 +38,29 @@ interface AddProductFormProps {
     scope: IProductBranchScopeModel;
     /** When set the form edits this product's stock, otherwise it adds stock. */
     product?: IProductModel | null;
+    /** Software Licenses page: adds / edits software and its license keys only */
+    softwareOnly?: boolean;
 }
+
+// Purchase details only apply to serial-tracked units being added
+const addProductSchema = productSchema.shape(purchaseDetailsSchema);
+
+// Supplier, date, cost and invoice of the units being added; each unit's history links back to it
+const PurchaseFields = ({ isLicense }: { isLicense: boolean }) => {
+    const today = useMemo(() => new Date(), []);
+    return (
+        <div className="flex flex-col gap-3 rounded-xl border border-slate-200 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{isLicense ? "License purchase (optional)" : "Purchase details (optional)"}</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+                <Field id="supplierName" name="supplierName" label={isLicense ? "Software Provider" : "Supplier / Dealer"} placeholder="Supplier name" component={Input} />
+                <Field id="purchaseReference" name="purchaseReference" label="Invoice / Reference No." placeholder="e.g. INV-1024" component={Input} />
+                <Field id="purchaseDate" name="purchaseDate" label="Purchase Date" maxDate={today} component={DatePicker} />
+                <Field id="unitAmount" name="unitAmount" type="number" inputMode="decimal" min={0} step="0.01" label={isLicense ? "Cost per License (₹)" : "Purchase Price per Unit (₹)"} placeholder="0" component={Input} />
+            </div>
+            <p className="px-1 text-xs text-slate-500">Recorded in each serial number's history and used for its profit.</p>
+        </div>
+    );
+};
 
 const stockIn = (product: IProductModel | null | undefined, branchId: string) =>
     product?.stocks.find((s) => String(s.branchId) === branchId);
@@ -54,13 +93,23 @@ const BranchStockHint = ({ product, branches }: { product?: IProductModel | null
     const current = quantityIn(product, values.branchId);
 
     if (!product) {
+        const text: Record<ProductType, string> = {
+            Standard: `If this product already exists in ${branchName}, the quantity is added to its current stock.`,
+            Serialized: `If this product already exists in ${branchName}, these units are added to its current stock.`,
+            Software: `These licenses join ${branchName}'s license pool. Physical stock isn't changed.`,
+            Service: `${branchName} will offer this service.`,
+        };
+        return <p className="-mt-2 px-1 text-xs text-slate-500">{text[values.productType]}</p>;
+    }
+    if (product.productType === "Software") {
         return (
             <p className="-mt-2 px-1 text-xs text-slate-500">
-                {values.hasSerialNumber
-                    ? `If this product already exists in ${branchName}, these units are added to its current stock.`
-                    : `If this product already exists in ${branchName}, the quantity is added to its current stock.`}
+                These are the licenses available in {branchName}'s pool. Add a line to add a license, delete a line to remove it. Sold licenses aren't listed. Physical stock isn't changed.
             </p>
         );
+    }
+    if (product.productType === "Service") {
+        return <p className="-mt-2 px-1 text-xs text-slate-500">Services have no stock. Each sale creates installation IDs for its history.</p>;
     }
     if (product.hasSerialNumber) {
         return (
@@ -98,7 +147,7 @@ const listForMessage = (serials: string[]) =>
 // Serial number box for tracked products; the quantity is the number of serial numbers.
 // Repeats and serial numbers that already exist (in stock anywhere or sold) are flagged while
 // typing and block saving; the API checks again on save.
-const SerialNumbersField = ({ isEdit, product }: { isEdit: boolean; product?: IProductModel | null }) => {
+const SerialNumbersField = ({ isEdit, product, isLicense }: { isEdit: boolean; product?: IProductModel | null; isLicense: boolean }) => {
     const { values, touched, validateField } = useFormikContext<IProductFormValues>();
     // Once the box has been left, Formik shows the same message under it, so the live ones step aside
     const showLive = !touched.serialNumbers;
@@ -150,8 +199,8 @@ const SerialNumbersField = ({ isEdit, product }: { isEdit: boolean; product?: IP
             <Field
                 id="serialNumbers"
                 name="serialNumbers"
-                label="Serial Numbers (one per line)"
-                placeholder={"SN1001\nSN1002\nSN1003"}
+                label={isLicense ? "License Keys / Activation IDs (one per line)" : "Serial Numbers (one per line)"}
+                placeholder={isLicense ? "SW-LIC-1001\nSW-LIC-1002" : "SN1001\nSN1002\nSN1003"}
                 rows={5}
                 validate={validate}
                 component={Textarea}
@@ -164,15 +213,15 @@ const SerialNumbersField = ({ isEdit, product }: { isEdit: boolean; product?: IP
                 <p className="px-1 text-xs text-red-500">Already exists: {listForMessage(existingNow)}</p>
             )}
             <p className="px-1 text-xs text-slate-500">
-                Quantity: <span className="font-semibold text-slate-700">{count.toLocaleString("en-IN")}</span>
-                {count === 1 ? " unit" : " units"}
+                {isLicense ? "Licenses" : "Quantity"}: <span className="font-semibold text-slate-700">{count.toLocaleString("en-IN")}</span>
+                {isLicense ? (count === 1 ? " license" : " licenses") : count === 1 ? " unit" : " units"}
                 {isChecking && <span className="ml-2 text-slate-400">Checking serial numbers...</span>}
             </p>
         </div>
     );
 };
 
-const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFormProps) => {
+const AddProductForm = ({ open, onClose, onSaved, scope, product, softwareOnly = false }: AddProductFormProps) => {
     const isEdit = !!product;
     const { isAdmin } = scope;
 
@@ -189,23 +238,37 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
             : product?.stocks[0] ? String(product.stocks[0].branchId) : "";
         return {
             name: product?.name ?? "",
-            hasSerialNumber: product?.hasSerialNumber ?? false,
+            productType: product?.productType ?? (softwareOnly ? "Software" : "Standard"),
+            licenseReassignable: product?.licenseReassignable ?? false,
             serialNumbers: serialTextIn(product, branchId),
             quantity: quantityIn(product, branchId) ?? "",
             branchId,
+            supplierName: "",
+            purchaseDate: format(new Date(), DATE_VALUE_FORMAT),
+            unitAmount: "",
+            purchaseReference: "",
         };
-    }, [isAdmin, scope.branchId, product]);
+    }, [isAdmin, scope.branchId, product, softwareOnly]);
 
     const { mutate: saveProduct, isPending } = useMutation({
         mutationFn: (values: IProductFormValues) => {
             const body: IProductCreateModel = {
                 name: values.name.trim(),
                 branchId: Number(values.branchId),
-                ...(values.hasSerialNumber
-                    ? { serialNumbers: splitSerialNumbers(values.serialNumbers) }
-                    : { quantity: Number(values.quantity) }),
-                // Whether a product uses serial numbers is only chosen when it is first added
-                ...(!product && { hasSerialNumber: values.hasSerialNumber }),
+                ...(usesSerials(values.productType) && { serialNumbers: splitSerialNumbers(values.serialNumbers) }),
+                ...(values.productType === "Standard" && { quantity: Number(values.quantity) }),
+                // The product's type is only chosen when it is first added
+                ...(!product && { productType: values.productType, hasSerialNumber: usesSerials(values.productType) }),
+                // License terms: set when adding, and changeable later by admins
+                ...(values.productType === "Software" && (!product || isAdmin) && { licenseReassignable: values.licenseReassignable }),
+                ...(!product && usesSerials(values.productType) && {
+                    purchase: {
+                        supplierName: values.supplierName.trim() || undefined,
+                        purchaseDate: values.purchaseDate || undefined,
+                        unitAmount: values.unitAmount === "" ? undefined : Number(values.unitAmount),
+                        reference: values.purchaseReference.trim() || undefined,
+                    },
+                }),
             };
             return product ? productService.updateProduct(product.id, body) : productService.createProduct(body);
         },
@@ -223,10 +286,15 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
     });
 
     return (
-        <Dialog open={open} onClose={onClose} title={isEdit ? "Edit Product Stock" : "Add Product"} preventClose={isPending}>
+        <Dialog
+            open={open}
+            onClose={onClose}
+            title={softwareOnly ? (isEdit ? "Edit Software & License Keys" : "Add Software") : isEdit ? "Edit Product Stock" : "Add Product"}
+            preventClose={isPending}
+        >
             <Formik
                 initialValues={initialValues}
-                validationSchema={productSchema}
+                validationSchema={isEdit ? productSchema : addProductSchema}
                 onSubmit={(values) => saveProduct(values)}
             >
                 {({ values }) => (
@@ -236,8 +304,8 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
                             <Field
                                 id="name"
                                 name="name"
-                                label="Product Name"
-                                placeholder="Enter product name"
+                                label={softwareOnly ? "Software Name" : "Product Name"}
+                                placeholder={softwareOnly ? "e.g. Diagnostic Software Pro" : "Enter product name"}
                                 // The name is shared by every branch, so only admins may rename
                                 disabled={isEdit && !isAdmin}
                                 component={Input}
@@ -247,18 +315,32 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
                                 <p className="px-1 text-xs text-slate-500">Only an admin can rename a product.</p>
                             )}
                         </div>
-                        {!isEdit && (
+                        {!isEdit && !softwareOnly && (
+                            <div className="flex flex-col gap-1">
+                                <Field id="productType" name="productType" label="Product Type" options={TYPE_OPTIONS} component={Select} />
+                                <p className="px-1 text-xs text-slate-500">
+                                    {TYPE_HINT[values.productType]} Can't be changed later; an existing product keeps its own type. Software licenses are added from the Software Licenses page.
+                                </p>
+                            </div>
+                        )}
+                        {!isEdit && softwareOnly && (
+                            <p className="-mt-1 px-1 text-xs text-slate-500">{TYPE_HINT.Software} If this software already exists, the keys are added to it.</p>
+                        )}
+                        {isEdit && !softwareOnly && (
+                            <p className="-mt-1 px-1 text-xs text-slate-500">Type: <span className="font-semibold text-slate-700">{PRODUCT_TYPE_LABEL[values.productType]}</span></p>
+                        )}
+                        {values.productType === "Software" && (!isEdit || isAdmin) && (
                             <div className="flex flex-col gap-1">
                                 <Field
-                                    id="hasSerialNumber"
-                                    name="hasSerialNumber"
-                                    label="Each unit has a serial number"
-                                    onLabel="Yes"
-                                    offLabel="No"
+                                    id="licenseReassignable"
+                                    name="licenseReassignable"
+                                    label="Returned licenses can be sold again"
+                                    onLabel="Yes, reassignable"
+                                    offLabel="No, single-use"
                                     component={Switch}
                                 />
                                 <p className="px-1 text-xs text-slate-500">
-                                    Can't be changed later. If the product already exists, its existing setting is used.
+                                    Single-use licenses are deactivated for good when returned or cancelled.
                                 </p>
                             </div>
                         )}
@@ -272,7 +354,7 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
                                 disabled={!isAdmin}
                                 component={Select}
                             />
-                            {!values.hasSerialNumber && (
+                            {values.productType === "Standard" && (
                                 <Field
                                     id="quantity"
                                     name="quantity"
@@ -287,7 +369,8 @@ const AddProductForm = ({ open, onClose, onSaved, scope, product }: AddProductFo
                                 />
                             )}
                         </div>
-                        {values.hasSerialNumber && <SerialNumbersField isEdit={isEdit} product={product} />}
+                        {usesSerials(values.productType) && <SerialNumbersField isEdit={isEdit} product={product} isLicense={values.productType === "Software"} />}
+                        {usesSerials(values.productType) && !isEdit && <PurchaseFields isLicense={values.productType === "Software"} />}
                         <BranchStockHint product={product} branches={branchOptions} />
                         {isAdmin && branchOptions.length === 0 && (
                             <p className="-mt-2 text-xs text-red-500">No active branches found. Add a branch first.</p>

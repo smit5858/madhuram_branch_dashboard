@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import clsx from "clsx";
-import { ChevronLeft, ChevronRight, Package, ShoppingCart, Building2, Users, Contact, TrendingUp, TrendingDown, ReceiptIndianRupee, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Package, ShoppingCart, Building2, Users, Contact, TrendingUp, TrendingDown, ReceiptIndianRupee, ScanBarcode, Undo2, KeyRound, type LucideIcon } from "lucide-react";
 import LOGO from "@/assets/logo.jpg";
 import type { RootState } from "../../store/store";
 import { useSelector, useDispatch } from "react-redux";
@@ -19,7 +19,10 @@ interface SidebarItem {
 
 const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
     { path: "/products", name: "Products", icon: Package },
+    { path: "/software", name: "Software Licenses", icon: KeyRound },
     { path: "/sales", name: "Sales", icon: ShoppingCart },
+    { path: "/returns", name: "Returns", icon: Undo2 },
+    { path: "/serial-tracking", name: "Serial Tracking", icon: ScanBarcode },
     { path: "/customers", name: "Customers", icon: Contact },
     { path: "/income", name: "Income", icon: TrendingUp },
     { path: "/expense", name: "Expense", icon: TrendingDown },

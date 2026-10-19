@@ -13,6 +13,9 @@ const Customers = lazy(() => import('@/pages/Customers/Customers'));
 const Income = lazy(() => import('@/pages/Income/Income'));
 const Expense = lazy(() => import('@/pages/Expense/Expense'));
 const RajkotExpense = lazy(() => import('@/pages/RajkotExpense/RajkotExpense'));
+const SerialTracking = lazy(() => import('@/pages/SerialTracking/SerialTracking'));
+const Returns = lazy(() => import('@/pages/Returns/Returns'));
+const Software = lazy(() => import('@/pages/Software/Software'));
 
 const privateRoutes = (Element: any , props?: any, roles?: string[]) => {
     return <ProtectedRoute roles={roles} element={props ? <Element {...props} /> : <Element />} />
@@ -25,10 +28,13 @@ const routesConfig = [
             {path: '/', element: <Navigate to="/login" />},
             {path: '/login', element: <Login />},
             {path: '/products', element: <MainLayout>{privateRoutes(Products)}</MainLayout>},
+            {path: '/software', element: <MainLayout>{privateRoutes(Software)}</MainLayout>},
             {path: '/sales', element: <MainLayout>{privateRoutes(Sales)}</MainLayout>},
             {path: '/customers', element: <MainLayout>{privateRoutes(Customers)}</MainLayout>},
             {path: '/income', element: <MainLayout>{privateRoutes(Income)}</MainLayout>},
             {path: '/expense', element: <MainLayout>{privateRoutes(Expense)}</MainLayout>},
+            {path: '/serial-tracking', element: <MainLayout>{privateRoutes(SerialTracking)}</MainLayout>},
+            {path: '/returns', element: <MainLayout>{privateRoutes(Returns)}</MainLayout>},
             {path: '/rajkot-expense', element: <MainLayout>{privateRoutes(RajkotExpense)}</MainLayout>},
             {path: '/branch', element: <MainLayout>{privateRoutes(Branch)}</MainLayout>},
             {path: '/employee', element: <MainLayout>{privateRoutes(Employee, undefined, ["admin"])}</MainLayout>},

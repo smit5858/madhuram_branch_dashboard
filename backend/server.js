@@ -15,6 +15,8 @@ const customerRoutes = require("@/routes/customer.route");
 const incomeRoutes = require("@/routes/income.route");
 const expenseRoutes = require("@/routes/expense.route");
 const rajkotExpenseRoutes = require("@/routes/rajkotExpense.route");
+const serialRoutes = require("@/routes/serial.route");
+const saleReturnRoutes = require("@/routes/saleReturn.route");
 
 const app = express();
 app.use(cors());
@@ -35,6 +37,8 @@ app.use("/api/customer", customerRoutes);
 app.use("/api/income", incomeRoutes);
 app.use("/api/expense", expenseRoutes);
 app.use("/api/rajkot-expense", rajkotExpenseRoutes);
+app.use("/api/serial", serialRoutes);
+app.use("/api/sale-return", saleReturnRoutes);
 
 const PORT = process.env.PORT || 3000;
 

@@ -13,6 +13,10 @@ const RajkotExpenseItem = require('@/models/rajkotExpenseItem.model')
 const RajkotExpenseSerial = require('@/models/rajkotExpenseSerial.model')
 const RajkotExpenseCounter = require('@/models/rajkotExpenseCounter.model')
 const LedgerBalance = require('@/models/ledgerBalance.model')
+const ProductPurchase = require('@/models/productPurchase.model')
+const SerialUnit = require('@/models/serialUnit.model')
+const SerialEvent = require('@/models/serialEvent.model')
+const SaleReturn = require('@/models/saleReturn.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -80,6 +84,31 @@ RajkotExpenseSerial.belongsTo(RajkotExpenseItem, {foreignKey: "rajkotExpenseItem
 Branch.hasOne(RajkotExpenseCounter, {foreignKey: "branchId", onDelete: "CASCADE"});
 RajkotExpenseCounter.belongsTo(Branch, {foreignKey: "branchId", onDelete: "CASCADE"});
 
+// Serial number history is permanent: removing a product, branch, sale or employee only clears
+// the link (names are kept on the rows), never the history itself.
+Product.hasMany(SerialUnit, {foreignKey: "productId", onDelete: "SET NULL"});
+SerialUnit.belongsTo(Product, {foreignKey: "productId", onDelete: "SET NULL"});
+Branch.hasMany(SerialUnit, {foreignKey: "branchId", onDelete: "SET NULL"});
+SerialUnit.belongsTo(Branch, {foreignKey: "branchId", onDelete: "SET NULL"});
+SerialUnit.belongsTo(Sale, {foreignKey: "currentSaleId", as: "currentSale", constraints: false});
+
+SerialUnit.hasMany(SerialEvent, {foreignKey: "serialUnitId", as: "events", onDelete: "CASCADE"});
+SerialEvent.belongsTo(SerialUnit, {foreignKey: "serialUnitId", onDelete: "CASCADE"});
+SerialEvent.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+
+Product.hasMany(ProductPurchase, {foreignKey: "productId", onDelete: "SET NULL"});
+ProductPurchase.belongsTo(Product, {foreignKey: "productId", onDelete: "SET NULL"});
+ProductPurchase.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+
+SerialUnit.hasMany(SaleReturn, {foreignKey: "serialUnitId", as: "returns", onDelete: "CASCADE"});
+SaleReturn.belongsTo(SerialUnit, {foreignKey: "serialUnitId", onDelete: "CASCADE"});
+Sale.hasMany(SaleReturn, {foreignKey: "saleId", as: "returns", constraints: false});
+SaleReturn.belongsTo(Sale, {foreignKey: "saleId", constraints: false});
+SaleReturn.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+SaleReturn.belongsTo(Employee, {foreignKey: "decidedBy", as: "decider", onDelete: "SET NULL"});
+// For the product's type and license terms; the return keeps productName if it is removed
+SaleReturn.belongsTo(Product, {foreignKey: "productId", constraints: false});
+
 module.exports = {
     Employee,
     Roles,
@@ -96,4 +125,8 @@ module.exports = {
     RajkotExpenseSerial,
     RajkotExpenseCounter,
     LedgerBalance,
+    ProductPurchase,
+    SerialUnit,
+    SerialEvent,
+    SaleReturn,
 }

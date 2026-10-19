@@ -1,8 +1,13 @@
 const { Op, UniqueConstraintError } = require("sequelize");
 const sequelize = require("@/config/db");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Sale, Product, ProductStock, ProductSerial, Branch, Customer } = require("@/models/index");
+const { Sale, Product, ProductStock, ProductSerial, Branch, Customer, SaleReturn, SerialUnit, SerialEvent } = require("@/models/index");
 const { parseCustomerFields, comparableName, duplicateMessage, toCustomerResponse } = require("@/helper/customer");
+const {
+    EVENT, UNIT_STATUS, RETURN_STATUS, HELD_STATUSES, LIFECYCLE_EVENTS, SALE_TYPE, saleReference, saleSnapshot,
+    recordSale, releaseFromSale, recordSaleEdit, nextServiceIds, createServiceUnits, cancelRenewal,
+} = require("@/helper/serialHistory");
+const { PRODUCT_TYPE, MAX_SERVICE_UNITS, typeOf, tracksStock } = require("@/helper/productType");
 
 // Every handler runs after loadBranchScope, so req.branchScope = { isAdmin, branchId } comes
 // from the logged-in employee's record. A branchId in the request is never trusted on its own.
@@ -15,6 +20,20 @@ const { parseCustomerFields, comparableName, duplicateMessage, toCustomerRespons
 // Serial numbers: for a serial-tracked product the sale names the exact units sold. Those
 // product_serial rows are removed from the branch's stock and their numbers saved on the sale;
 // editing or deleting the sale puts them back. The quantity always equals the number of serials.
+// Each unit's serial number history records the sale, edit or cancellation in the same
+// transaction (helper/serialHistory.js).
+//
+// Returns: once a unit of a sale has been returned (controllers/saleReturn.controller.js) the
+// sale is part of that unit's history, so it can no longer be edited or deleted.
+//
+// Product types (helper/productType.js):
+//  - Software: the sale names license keys from the branch's license pool (serial_unit). No
+//    physical stock is checked or moved, so a license sells even when the quantity is 0. Once a
+//    license has been installed, activated, renewed or cancelled, its sale is locked like a returned one.
+//  - Service: no stock. Each unit sold gets a generated installation ID (INS-00012-1), saved on the
+//    sale like serial numbers, so every installation has its own history.
+//  - Renewal sales (saleType "Renewal") are recorded from a license's history. They can be deleted,
+//    which cancels the renewal and restores the previous expiry date, but not edited.
 //
 // Customers: every saved sale is linked to a customer record (see resolveSaleCustomer). The
 // customer is found or created inside the sale's transaction, so a sale that fails never
@@ -278,13 +297,51 @@ const returnStock = async ({ productId, branchId, quantity, transaction }) => {
 
 // Checks the sale's serial numbers against the product: tracked products need exactly one
 // serial number per unit, others none.
+// Services take a quantity only (their installation IDs are generated), at most MAX_SERVICE_UNITS.
 const checkSerialsForProduct = (product, { serialNumbers, quantity }) => {
+    const type = typeOf(product);
+    if (type === PRODUCT_TYPE.SERVICE && quantity > MAX_SERVICE_UNITS) {
+        throw new SaleError(`At most ${MAX_SERVICE_UNITS} installations in one sale`);
+    }
     if (!product.hasSerialNumber) {
-        if (serialNumbers.length > 0) throw new SaleError(`${product.name} doesn't use serial numbers`);
+        if (serialNumbers.length > 0) {
+            throw new SaleError(type === PRODUCT_TYPE.SERVICE
+                ? `${product.name} is a service. Its installation IDs are created with the sale.`
+                : `${product.name} doesn't use serial numbers`);
+        }
         return;
     }
-    if (serialNumbers.length === 0) throw new SaleError("Select the serial number of each unit sold");
-    if (serialNumbers.length !== quantity) throw new SaleError("Quantity must match the number of serial numbers selected");
+    const word = type === PRODUCT_TYPE.SOFTWARE ? "license key" : "serial number";
+    if (serialNumbers.length === 0) throw new SaleError(`Select the ${word} of each unit sold`);
+    if (serialNumbers.length !== quantity) throw new SaleError(`Quantity must match the number of ${word}s selected`);
+};
+
+// Licenses picked for a Software sale. Each must be in this branch's license pool, or already
+// on this same sale (when editing). Locked, so two sales can never take the same license.
+// Returns the stored keys. No stock is touched.
+const takeLicenses = async ({ productId, branchId, serialNumbers, saleId = null, transaction }) => {
+    if (serialNumbers.length === 0) return [];
+    const units = await SerialUnit.findAll({
+        where: { serialNumber: serialNumbers, productId, productType: PRODUCT_TYPE.SOFTWARE },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+    });
+    const usable = units.filter((u) => (u.status === UNIT_STATUS.AVAILABLE && u.branchId === branchId)
+        || (saleId && u.currentSaleId === saleId && HELD_STATUSES.includes(u.status)));
+    const byKey = new Map(usable.map((u) => [u.serialNumber.toLowerCase(), u.serialNumber]));
+    const missing = serialNumbers.filter((sn) => !byKey.has(sn.toLowerCase()));
+    if (missing.length > 0) {
+        throw new SaleError(`Not available in this branch's license pool: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ` and ${missing.length - 5} more` : ""}`);
+    }
+    return serialNumbers.map((sn) => byKey.get(sn.toLowerCase()));
+};
+
+// Installation IDs of a Service sale with `quantity` units: the ones it already has (same
+// product) are kept in order, extra units get new IDs, surplus ones drop off (and are cancelled).
+const serviceIdsFor = async ({ saleId, before, productId, quantity, transaction }) => {
+    const kept = before && before.productId === productId ? before.serialNumbers.slice(0, quantity) : [];
+    const extra = quantity - kept.length;
+    return extra > 0 ? [...kept, ...(await nextServiceIds(saleId, extra, transaction))] : kept;
 };
 
 // Removes the sold units from the branch's stock and returns their stored serial numbers.
@@ -317,12 +374,31 @@ const returnSerials = async ({ productId, branchId, serialNumbers, transaction }
     );
 };
 
+// A sale with a recorded return, or whose license / installation has moved on (installed,
+// activated, renewed, cancelled), is history for that unit and stays as it is
+const assertNoReturns = async (saleId, action, transaction) => {
+    const count = await SaleReturn.count({ where: { saleId }, transaction });
+    if (count > 0) {
+        throw new SaleError(`This sale has a recorded return, so it can't be ${action}. Its history is kept with the serial number.`, 409);
+    }
+    const lifecycle = await SerialEvent.count({ where: { saleId, type: LIFECYCLE_EVENTS }, transaction });
+    if (lifecycle > 0) {
+        throw new SaleError(`This sale's license or installation has already been installed, activated, renewed or cancelled, so the sale can't be ${action}. Record a return or deactivate it from the serial number's history instead.`, 409);
+    }
+};
+
 // A branch member only ever finds sales of their own branch; anything else looks missing
 const findScopedSale = (id, scope, options = {}) =>
     Sale.findOne({ where: scope.isAdmin ? { id } : { id, branchId: scope.branchId }, ...options });
 
-const toSaleResponse = (sale) => ({
+// returnInfo: { returns, returnable } for the sale, from loadReturnInfo
+const toSaleResponse = (sale, returnInfo) => ({
     id: sale.id,
+    reference: saleReference(sale.id),
+    // "Sale" or "Renewal"
+    saleType: sale.saleType,
+    // Standard / Serialized / Software / Service; null for "Other" or a removed product
+    productType: sale.Product ? typeOf(sale.Product) : null,
     customerId: sale.customerId,
     // Follow edits made in the Customers module; fall back to the sale's own copy otherwise
     customerName: sale.Customer?.name ?? sale.customerName,
@@ -339,7 +415,53 @@ const toSaleResponse = (sale) => ({
     branchName: sale.Branch?.name ?? null,
     createdAt: sale.createdAt,
     updatedAt: sale.updatedAt,
+    // Returns recorded against this sale; any return locks the sale against edits and deletion
+    returns: returnInfo?.returns ?? [],
+    // Serial numbers of this sale that are still with the customer and can be returned
+    returnableSerials: returnInfo?.returnable ?? [],
 });
+
+// Returns and still-returnable serial numbers of a page of sales. A unit is returnable from a
+// sale only while that sale is the unit's current sale and the unit is Sold, so a unit resold
+// later can't be returned against its earlier sale.
+const loadReturnInfo = async (sales) => {
+    const info = new Map(sales.map((s) => [s.id, { returns: [], returnable: [] }]));
+    const ids = sales.map((s) => s.id);
+    if (ids.length === 0) return info;
+
+    const serials = sales.flatMap((s) => s.serialNumbers);
+    const [returns, units] = await Promise.all([
+        SaleReturn.findAll({
+            where: { saleId: ids },
+            attributes: ["id", "saleId", "serialNumber", "status", "refundAmount", "returnDate"],
+            order: [["id", "ASC"]],
+            raw: true,
+        }),
+        serials.length === 0 ? [] : SerialUnit.findAll({
+            where: { serialNumber: serials },
+            attributes: ["serialNumber", "status", "currentSaleId"],
+            raw: true,
+        }),
+    ]);
+    // A license or installation that is still with the customer can be returned too
+    for (const r of returns) {
+        info.get(r.saleId).returns.push({ ...r, refundAmount: Number(r.refundAmount) });
+    }
+    const unitBy = new Map(units.map((u) => [u.serialNumber.toLowerCase(), u]));
+    for (const sale of sales) {
+        const returned = new Set(info.get(sale.id).returns
+            .filter((r) => r.status !== RETURN_STATUS.REJECTED)
+            .map((r) => r.serialNumber.toLowerCase()));
+        info.get(sale.id).returnable = sale.serialNumbers.filter((sn) => {
+            const unit = unitBy.get(sn.toLowerCase());
+            // Recorded before tracking: still on this sale and never returned
+            if (sale.saleType === SALE_TYPE.RENEWAL) return false;
+            if (!unit) return !returned.has(sn.toLowerCase());
+            return HELD_STATUSES.includes(unit.status) && unit.currentSaleId === sale.id;
+        });
+    }
+    return info;
+};
 
 const sendSaleError = (res, error) => {
     if (error instanceof SaleError) return sendError(res, error.message, error.code, error.status, error.data);
@@ -359,7 +481,7 @@ exports.saleProducts = async (req, res) => {
         const stocks = await ProductStock.findAll({
             where: { branchId: resolved.branchId },
             attributes: ["productId", "quantity"],
-            include: [{ model: Product, attributes: ["id", "name", "hasSerialNumber"], required: true }],
+            include: [{ model: Product, attributes: ["id", "name", "hasSerialNumber", "productType"], required: true }],
             order: [[Product, "name", "ASC"]],
         });
 
@@ -370,6 +492,14 @@ exports.saleProducts = async (req, res) => {
             order: [["serialNumber", "ASC"]],
             raw: true,
         });
+        // Licenses in this branch's pool, for Software products
+        const licenses = await SerialUnit.findAll({
+            where: { branchId: resolved.branchId, productType: PRODUCT_TYPE.SOFTWARE, status: UNIT_STATUS.AVAILABLE },
+            attributes: ["productId", "serialNumber"],
+            order: [["serialNumber", "ASC"]],
+            raw: true,
+        });
+        serials.push(...licenses);
         const serialsByProduct = new Map();
         for (const row of serials) {
             if (!serialsByProduct.has(row.productId)) serialsByProduct.set(row.productId, []);
@@ -382,8 +512,12 @@ exports.saleProducts = async (req, res) => {
                 id: s.productId,
                 name: s.Product.name,
                 hasSerialNumber: s.Product.hasSerialNumber,
+                productType: typeOf(s.Product),
                 serialNumbers: serialsByProduct.get(s.productId) ?? [],
-                quantity: s.quantity,
+                // Software: licenses in the pool; Service: null (no limit from stock)
+                quantity: typeOf(s.Product) === PRODUCT_TYPE.SOFTWARE
+                    ? (serialsByProduct.get(s.productId) ?? []).length
+                    : typeOf(s.Product) === PRODUCT_TYPE.SERVICE ? null : s.quantity,
             })),
         };
         return sendSuccess(res, "Sale products...", data, 200);
@@ -407,7 +541,10 @@ const buildSaleWhere = (scope, query) => {
         const like = { [Op.like]: `%${search}%` };
         // Phone numbers are stored without spaces or dashes, so match the typed digits that way
         const phoneSearch = search.replace(/[\s()-]/g, "");
+        // "SALE-00012" finds that sale, so a serial number history can link to it
+        const reference = /^SALE-0*(\d{1,9})$/i.exec(search);
         where[Op.or] = [
+            ...(reference ? [{ id: Number(reference[1]) }] : []),
             { customerName: like },
             { productName: like },
             { "$Product.name$": like },
@@ -450,7 +587,7 @@ exports.sale = async (req, res) => {
         const { count, rows } = await Sale.findAndCountAll({
             where,
             include: [
-                { model: Product, attributes: ["id", "name"], required: false },
+                { model: Product, attributes: ["id", "name", "productType", "hasSerialNumber"], required: false },
                 { model: Branch, attributes: ["id", "name"], required: false },
                 { model: Customer, required: false },
             ],
@@ -460,8 +597,9 @@ exports.sale = async (req, res) => {
             distinct: true,
         });
 
+        const returnInfo = await loadReturnInfo(rows);
         const data = {
-            sale: rows.map(toSaleResponse),
+            sale: rows.map((row) => toSaleResponse(row, returnInfo.get(row.id))),
             pagination: {
                 total: count,
                 page,
@@ -479,13 +617,14 @@ exports.sale = async (req, res) => {
 // Total selling amount per branch for the same search and date filters as the list (no dates
 // means all time). Branch members only get their own branch; admins get every branch,
 // including ones with nothing matching.
+// refunds: refunds of those sales' returns (rejected returns don't count), so net = total − refunds.
 exports.salesSummary = async (req, res) => {
     try {
         const scope = req.branchScope;
         const filter = buildSaleWhere(scope, req.query);
         if (filter.error) return sendError(res, filter.error, null, 400);
 
-        const [rows, branches] = await Promise.all([
+        const [rows, refundRows, typeRows, branches] = await Promise.all([
             Sale.findAll({
                 where: filter.where,
                 include: [
@@ -494,6 +633,33 @@ exports.salesSummary = async (req, res) => {
                 ],
                 attributes: ["branchId", [sequelize.fn("SUM", sequelize.col("Sale.sellingAmount")), "total"]],
                 group: ["Sale.branchId"],
+                raw: true,
+            }),
+            // Each return joins its one sale, so summing the returns never counts a sale twice
+            Sale.findAll({
+                where: filter.where,
+                include: [
+                    { model: Product, attributes: [], required: false },
+                    { model: Customer, attributes: [], required: false },
+                    { model: SaleReturn, as: "returns", attributes: [], required: true, where: { status: { [Op.ne]: RETURN_STATUS.REJECTED } } },
+                ],
+                attributes: ["branchId", [sequelize.fn("SUM", sequelize.col("returns.refundAmount")), "refunds"]],
+                group: ["Sale.branchId"],
+                raw: true,
+            }),
+            // Revenue split by product type, so software and service sales are visible on their own
+            Sale.findAll({
+                where: filter.where,
+                include: [
+                    { model: Product, attributes: [], required: false },
+                    { model: Customer, attributes: [], required: false },
+                ],
+                attributes: [
+                    [sequelize.col("Product.productType"), "productType"],
+                    "saleType",
+                    [sequelize.fn("SUM", sequelize.col("Sale.sellingAmount")), "total"],
+                ],
+                group: ["Product.productType", "Sale.saleType"],
                 raw: true,
             }),
             Branch.findAll({
@@ -505,9 +671,25 @@ exports.salesSummary = async (req, res) => {
         ]);
 
         const totals = new Map(rows.map((r) => [r.branchId, Number(r.total) || 0]));
-        const branch = branches.map((br) => ({ branchId: br.id, branchName: br.name, total: totals.get(br.id) ?? 0 }));
+        const refunds = new Map(refundRows.map((r) => [r.branchId, Number(r.refunds) || 0]));
+        const toPaise = (n) => Math.round(n * 100);
+        const branch = branches.map((br) => {
+            const total = totals.get(br.id) ?? 0;
+            const refund = refunds.get(br.id) ?? 0;
+            return { branchId: br.id, branchName: br.name, total, refunds: refund, net: (toPaise(total) - toPaise(refund)) / 100 };
+        });
 
-        const data = { branch, total: branch.reduce((sum, br) => sum + br.total, 0) };
+        const sum = (field) => branch.reduce((acc, br) => acc + toPaise(br[field]), 0) / 100;
+        // "Other" covers sales of products outside (or removed from) the catalogue; renewals are their own line
+        const byType = new Map();
+        for (const r of typeRows) {
+            const label = r.saleType === SALE_TYPE.RENEWAL ? "Renewal" : r.productType ?? "Other";
+            byType.set(label, (byType.get(label) ?? 0) + toPaise(Number(r.total) || 0));
+        }
+        const data = {
+            branch, total: sum("total"), refunds: sum("refunds"), net: sum("net"),
+            byType: [...byType].map(([productType, total]) => ({ productType, total: total / 100 })),
+        };
         return sendSuccess(res, "Sales summary...", data, 200);
     } catch (error) {
         return sendError(res, error.message, null, 500);
@@ -537,11 +719,26 @@ exports.createSale = async (req, res) => {
             const product = await Product.findByPk(values.productId, { transaction });
             if (!product) throw new SaleError("Selected product does not exist");
             checkSerialsForProduct(product, values);
+            const type = typeOf(product);
 
-            await takeStock({ ...values, transaction });
-            const serialNumbers = await takeSerials({ ...values, transaction });
+            // Only Standard and Serialized products hold physical stock
+            let serialNumbers = [];
+            if (tracksStock(product)) {
+                await takeStock({ ...values, transaction });
+                serialNumbers = await takeSerials({ ...values, transaction });
+            } else if (type === PRODUCT_TYPE.SOFTWARE) {
+                serialNumbers = await takeLicenses({ ...values, transaction });
+            }
 
-            return Sale.create({ ...linked, serialNumbers, productName: product.name }, { transaction });
+            const created = await Sale.create({ ...linked, serialNumbers, productName: product.name }, { transaction });
+            if (type === PRODUCT_TYPE.SERVICE) {
+                const ids = await nextServiceIds(created.id, values.quantity, transaction);
+                await created.update({ serialNumbers: ids }, { transaction });
+                await createServiceUnits({ sale: created, serials: ids, employeeId: req.employee.id, transaction });
+            } else {
+                await recordSale({ sale: created, serials: serialNumbers, employeeId: req.employee.id, transaction });
+            }
+            return created;
         });
 
         return sendSuccess(res, "Sale added successfully", { id: sale.id, customerId: sale.customerId }, 201);
@@ -574,6 +771,27 @@ exports.updateSale = async (req, res) => {
             // Re-read under lock so two edits of the same sale can't both return its stock
             const sale = await findScopedSale(id, scope, { transaction, lock: transaction.LOCK.UPDATE });
             if (!sale) throw new SaleError(NOT_FOUND, 404);
+            if (sale.saleType === SALE_TYPE.RENEWAL) {
+                throw new SaleError("A renewal can't be edited. Delete it to cancel the renewal, then renew the license again.", 409);
+            }
+            await assertNoReturns(sale.id, "edited", transaction);
+            const before = saleSnapshot(sale);
+            // The product the sale was for decides what goes back (a removed product has nothing to return to)
+            const oldProduct = sale.productId ? await Product.findByPk(sale.productId, { transaction }) : null;
+            const oldTracksStock = !oldProduct || tracksStock(oldProduct);
+            let isService = false;
+
+            // Units that left, joined or stayed on the sale, for their serial number history
+            const recordHistory = async () => {
+                const now = sale.serialNumbers;
+                const has = (list, sn) => list.some((x) => x.toLowerCase() === sn.toLowerCase());
+                const employeeId = req.employee.id;
+                await releaseFromSale({ sale: before, serials: before.serialNumbers.filter((sn) => !has(now, sn)), type: EVENT.REMOVED_FROM_SALE, employeeId, transaction });
+                const joined = now.filter((sn) => !has(before.serialNumbers, sn));
+                if (isService) await createServiceUnits({ sale, serials: joined, employeeId, transaction });
+                else await recordSale({ sale, serials: joined, employeeId, transaction });
+                await recordSaleEdit({ before, sale, serials: now.filter((sn) => has(before.serialNumbers, sn)), employeeId, transaction });
+            };
 
             // Only this sale's link changes; the customer record (shared with their other
             // sales) is never edited from here
@@ -586,16 +804,18 @@ exports.updateSale = async (req, res) => {
             if (product) checkSerialsForProduct(product, values);
 
             // Units go back first, so the sale can keep some or all of its serial numbers
-            await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
+            if (oldTracksStock) await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
 
             if (!product) {
                 // Changed to "Other": everything the sale held goes back to stock
-                await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
+                if (oldTracksStock) await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
                 await sale.update({ ...values, serialNumbers: [] }, { transaction });
+                await recordHistory();
                 return customer.id;
             }
 
-            const sameStock = sale.productId === values.productId && sale.branchId === values.branchId;
+            const newTracksStock = tracksStock(product);
+            const sameStock = sale.productId === values.productId && sale.branchId === values.branchId && oldTracksStock && newTracksStock;
             if (sameStock) {
                 // Same branch and product: only the difference in quantity moves
                 const delta = values.quantity - sale.quantity;
@@ -605,12 +825,22 @@ exports.updateSale = async (req, res) => {
                     await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: -delta, transaction });
                 }
             } else {
-                await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
-                await takeStock({ ...values, transaction });
+                if (oldTracksStock) await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
+                if (newTracksStock) await takeStock({ ...values, transaction });
             }
 
-            const serialNumbers = await takeSerials({ ...values, transaction });
+            const type = typeOf(product);
+            let serialNumbers;
+            if (type === PRODUCT_TYPE.SOFTWARE) {
+                serialNumbers = await takeLicenses({ ...values, saleId: sale.id, transaction });
+            } else if (type === PRODUCT_TYPE.SERVICE) {
+                isService = true;
+                serialNumbers = await serviceIdsFor({ saleId: sale.id, before, productId: product.id, quantity: values.quantity, transaction });
+            } else {
+                serialNumbers = await takeSerials({ ...values, transaction });
+            }
             await sale.update({ ...values, serialNumbers, productName: product.name }, { transaction });
+            await recordHistory();
             return customer.id;
         });
 
@@ -620,7 +850,8 @@ exports.updateSale = async (req, res) => {
     }
 };
 
-// Hard delete; the sold quantity (and serial numbers) go back into the sale branch's stock
+// Hard delete; the sold quantity (and serial numbers) go back into the sale branch's stock.
+// Each unit's history keeps the sale and records its cancellation. Refused once a return exists.
 exports.deleteSale = async (req, res) => {
     try {
         const scope = req.branchScope;
@@ -630,9 +861,21 @@ exports.deleteSale = async (req, res) => {
         await sequelize.transaction(async (transaction) => {
             const sale = await findScopedSale(id, scope, { transaction, lock: transaction.LOCK.UPDATE });
             if (!sale) throw new SaleError(NOT_FOUND, 404);
+            // Deleting a renewal cancels it: the license keeps its history, its expiry goes back
+            if (sale.saleType === SALE_TYPE.RENEWAL) {
+                await cancelRenewal({ sale, employeeId: req.employee.id, transaction });
+                await sale.destroy({ transaction });
+                return;
+            }
+            await assertNoReturns(sale.id, "deleted", transaction);
 
-            await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
-            await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
+            // Software and Service sales never took physical stock, so none goes back
+            const product = sale.productId ? await Product.findByPk(sale.productId, { transaction }) : null;
+            if (!product || tracksStock(product)) {
+                await returnStock({ productId: sale.productId, branchId: sale.branchId, quantity: sale.quantity, transaction });
+                await returnSerials({ productId: sale.productId, branchId: sale.branchId, serialNumbers: sale.serialNumbers, transaction });
+            }
+            await releaseFromSale({ sale: saleSnapshot(sale), serials: sale.serialNumbers, type: EVENT.SALE_CANCELLED, employeeId: req.employee.id, transaction });
             await sale.destroy({ transaction });
         });
 

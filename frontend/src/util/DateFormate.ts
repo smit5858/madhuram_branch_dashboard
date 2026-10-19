@@ -7,4 +7,6 @@ export const DateToDateTimeString = (date: Date | string) => moment(date).format
 export const TimeToTimeString = (time: string | number) => moment(time, 'hh:mm').format('hh:mm '); // Outputs: "02:30"
 export const DateToLocalDateString = (date: string | Date) => moment(date).format('YYYY-MM-DD');
 export const DateToDateStringWithMonth = (date: Date | string | any) => moment(date).format('DD/MM/YYYY');
+/** "2026-10-15" (or any date) -> "15-10-2026"; empty for a missing value */
+export const DateToDisplayDate = (date: Date | string | null | undefined) => (date ? moment(date).format('DD-MM-YYYY') : '');
 
