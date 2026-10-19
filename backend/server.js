@@ -17,6 +17,7 @@ const expenseRoutes = require("@/routes/expense.route");
 const rajkotExpenseRoutes = require("@/routes/rajkotExpense.route");
 const serialRoutes = require("@/routes/serial.route");
 const saleReturnRoutes = require("@/routes/saleReturn.route");
+const branchPaymentRoutes = require("@/routes/branchPayment.route");
 
 const app = express();
 app.use(cors());
@@ -39,6 +40,7 @@ app.use("/api/expense", expenseRoutes);
 app.use("/api/rajkot-expense", rajkotExpenseRoutes);
 app.use("/api/serial", serialRoutes);
 app.use("/api/sale-return", saleReturnRoutes);
+app.use("/api/branch-payment", branchPaymentRoutes);
 
 const PORT = process.env.PORT || 3000;
 

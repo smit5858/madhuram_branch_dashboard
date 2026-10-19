@@ -1,6 +1,6 @@
 const { Op } = require("sequelize");
 const { sendError, sendSuccess } = require("@/helper/response");
-const { Branch } = require("@/models/index");
+const { Branch, BranchPayment } = require("@/models/index");
 
 exports.branch = async (req, res) => {
     try {
@@ -119,6 +119,12 @@ exports.deleteBranch = async (req, res) => {
 
         const branch = await Branch.findByPk(id);
         if (!branch) return sendError(res, "Branch not found", null, 404);
+
+        // Branch payments are financial history and are never deleted with a branch
+        const payments = await BranchPayment.count({ where: { [Op.or]: [{ fromBranchId: id }, { toBranchId: id }] } });
+        if (payments > 0) {
+            return sendError(res, `This branch has ${payments} branch payment record${payments === 1 ? "" : "s"} and can't be deleted. Deactivate it instead.`, null, 409);
+        }
 
         await branch.destroy({ force: true });
 

@@ -16,6 +16,7 @@ const RajkotExpense = lazy(() => import('@/pages/RajkotExpense/RajkotExpense'));
 const SerialTracking = lazy(() => import('@/pages/SerialTracking/SerialTracking'));
 const Returns = lazy(() => import('@/pages/Returns/Returns'));
 const Software = lazy(() => import('@/pages/Software/Software'));
+const BranchPayments = lazy(() => import('@/pages/BranchPayments/BranchPayments'));
 
 const privateRoutes = (Element: any , props?: any, roles?: string[]) => {
     return <ProtectedRoute roles={roles} element={props ? <Element {...props} /> : <Element />} />
@@ -36,6 +37,7 @@ const routesConfig = [
             {path: '/serial-tracking', element: <MainLayout>{privateRoutes(SerialTracking)}</MainLayout>},
             {path: '/returns', element: <MainLayout>{privateRoutes(Returns)}</MainLayout>},
             {path: '/rajkot-expense', element: <MainLayout>{privateRoutes(RajkotExpense)}</MainLayout>},
+            {path: '/branch-payments', element: <MainLayout>{privateRoutes(BranchPayments)}</MainLayout>},
             {path: '/branch', element: <MainLayout>{privateRoutes(Branch)}</MainLayout>},
             {path: '/employee', element: <MainLayout>{privateRoutes(Employee, undefined, ["admin"])}</MainLayout>},
         ],

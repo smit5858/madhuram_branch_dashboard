@@ -17,6 +17,8 @@ const ProductPurchase = require('@/models/productPurchase.model')
 const SerialUnit = require('@/models/serialUnit.model')
 const SerialEvent = require('@/models/serialEvent.model')
 const SaleReturn = require('@/models/saleReturn.model')
+const BranchPayment = require('@/models/branchPayment.model')
+const BranchPaymentEvent = require('@/models/branchPaymentEvent.model')
 
 Roles.hasMany(Employee, {foreignKey: "roleId"});
 Employee.belongsTo(Roles, {foreignKey: "roleId"});
@@ -109,6 +111,21 @@ SaleReturn.belongsTo(Employee, {foreignKey: "decidedBy", as: "decider", onDelete
 // For the product's type and license terms; the return keeps productName if it is removed
 SaleReturn.belongsTo(Product, {foreignKey: "productId", constraints: false});
 
+// A branch payment links its paying and receiving branch. Payments are financial history, so a
+// branch that has any can't be deleted (RESTRICT); it can be deactivated instead.
+Branch.hasMany(BranchPayment, {foreignKey: "fromBranchId", as: "paymentsSent", onDelete: "RESTRICT"});
+BranchPayment.belongsTo(Branch, {foreignKey: "fromBranchId", as: "fromBranch", onDelete: "RESTRICT"});
+Branch.hasMany(BranchPayment, {foreignKey: "toBranchId", as: "paymentsReceived", onDelete: "RESTRICT"});
+BranchPayment.belongsTo(Branch, {foreignKey: "toBranchId", as: "toBranch", onDelete: "RESTRICT"});
+BranchPayment.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+BranchPayment.belongsTo(Employee, {foreignKey: "updatedBy", as: "updater", onDelete: "SET NULL"});
+BranchPayment.belongsTo(Employee, {foreignKey: "completedBy", as: "completer", onDelete: "SET NULL"});
+BranchPayment.belongsTo(Employee, {foreignKey: "cancelledBy", as: "canceller", onDelete: "SET NULL"});
+
+BranchPayment.hasMany(BranchPaymentEvent, {foreignKey: "branchPaymentId", as: "events", onDelete: "CASCADE"});
+BranchPaymentEvent.belongsTo(BranchPayment, {foreignKey: "branchPaymentId", onDelete: "CASCADE"});
+BranchPaymentEvent.belongsTo(Employee, {foreignKey: "createdBy", as: "creator", onDelete: "SET NULL"});
+
 module.exports = {
     Employee,
     Roles,
@@ -129,4 +146,6 @@ module.exports = {
     SerialUnit,
     SerialEvent,
     SaleReturn,
+    BranchPayment,
+    BranchPaymentEvent,
 }

@@ -170,6 +170,36 @@ export const ledgerEntrySchema = (withPaymentMethod: boolean) => Yup.object({
 	branchId: Yup.string().required("Branch is required"),
 });
 
+// Branch-to-branch payments; the API checks the same rules and the branch access again.
+// Correcting a completed payment needs a reason (requireReason).
+export const branchPaymentSchema = (referenceRequired: string[], requireReason: boolean) => Yup.object({
+	paymentDate: Yup.string()
+		.required("Payment date is required")
+		.test("valid-date", "Enter a valid date", (value) => !value || isCompleteDate(value)),
+	fromBranchId: Yup.string().required("Paying branch is required"),
+	toBranchId: Yup.string()
+		.required("Receiving branch is required")
+		.test("different", "Paying and receiving branches must be different", function (value) {
+			return !value || value !== this.parent.fromBranchId;
+		}),
+	amount: Yup.number()
+		.typeError("Amount must be a number")
+		.moreThan(0, "Amount must be greater than 0")
+		.max(MAX_LEDGER_AMOUNT, "Amount is too large")
+		.test("two-decimals", "At most 2 decimal places", (value) => value === undefined || /^\d+(\.\d{1,2})?$/.test(String(value)))
+		.required("Amount is required"),
+	paymentMethod: Yup.string().required("Payment method is required"),
+	referenceNumber: Yup.string().trim().max(100, "Reference number must be at most 100 characters").when("paymentMethod", {
+		is: (method: string) => referenceRequired.includes(method),
+		then: (schema) => schema.required("Cheque number is required"),
+	}),
+	status: Yup.string(),
+	notes: Yup.string().trim().max(1000, "Notes must be at most 1000 characters"),
+	reason: requireReason
+		? Yup.string().trim().required("Add a reason for correcting a completed payment").max(1000, "Reason must be at most 1000 characters")
+		: Yup.string().trim().max(1000, "Reason must be at most 1000 characters"),
+});
+
 // Rajkot Expense entries; the API checks the same rules, the branch's stock and access again
 export const rajkotExpenseSchema = Yup.object({
 	branchId: Yup.string().required("Branch is required"),

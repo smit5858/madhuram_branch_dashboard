@@ -15,7 +15,8 @@
     "migrate:rajkot-expense": "node migrations/add-rajkot-expense.js",
     "migrate:ledger-balance": "node migrations/add-ledger-balance.js",
     "migrate:serial-tracking": "node migrations/add-serial-tracking.js",
-    "migrate:software-licenses": "node migrations/add-software-licenses.js"
+    "migrate:software-licenses": "node migrations/add-software-licenses.js",
+    "migrate:branch-payments": "node migrations/add-branch-payments.js"
   },
   "overrides": {
     "uuid": "^11.0.0"

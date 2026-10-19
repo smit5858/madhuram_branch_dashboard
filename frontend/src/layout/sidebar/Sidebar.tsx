@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import clsx from "clsx";
-import { ChevronLeft, ChevronRight, Package, ShoppingCart, Building2, Users, Contact, TrendingUp, TrendingDown, ReceiptIndianRupee, ScanBarcode, Undo2, KeyRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Package, ShoppingCart, Building2, Users, Contact, TrendingUp, TrendingDown, ReceiptIndianRupee, ScanBarcode, Undo2, KeyRound, ArrowLeftRight, type LucideIcon } from "lucide-react";
 import LOGO from "@/assets/logo.jpg";
 import type { RootState } from "../../store/store";
 import { useSelector, useDispatch } from "react-redux";
@@ -27,6 +27,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItem[] = [
     { path: "/income", name: "Income", icon: TrendingUp },
     { path: "/expense", name: "Expense", icon: TrendingDown },
     { path: "/rajkot-expense", name: "Rajkot Expense", icon: ReceiptIndianRupee },
+    { path: "/branch-payments", name: "Branch Payments", icon: ArrowLeftRight },
     { path: "/branch", name: "Branches", icon: Building2, roles: ["admin"] },
     { path: "/employee", name: "Employees", icon: Users, roles: ["admin"] },
 ];
